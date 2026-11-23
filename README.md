@@ -29,3 +29,16 @@ NEXT previews to the right, and controls in the lower-right corner.
 Terminal key-release support is not portable. Directional input is therefore
 implemented as press/repeat movement, which remains reliable in Windows
 Terminal, macOS Terminal, and common Linux terminals.
+
+## License and attribution
+
+Tetra|D is independently authored and distributed under the [MIT License](LICENSE).
+Copyright (c) 2026 KJRoby.
+
+Tetra|D is not affiliated with, endorsed by, or sponsored by The Tetris Company
+or any other trademark holder. This repository contains no third-party game
+source code, art, audio, logos, or branding assets. It uses common
+falling-block game conventions implemented independently.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for direct dependency
+notices.
