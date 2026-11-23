@@ -159,11 +159,10 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game) {
     };
     box_text(f,control,"CONTROLS","← → / A D  MOVE\n↑ X / Z     ROTATE\n↓ / S       SOFT DROP\nSPACE       HARD DROP\nC / H       HOLD\nP           PAUSE\nESC         QUIT".into());
     if let Some((c, p)) = g.clear_notice {
-        let notice = format!("{}  +{}", c.label(), p);
         f.render_widget(
-            Paragraph::new(notice)
+            Paragraph::new(clear_notice_line(c, p))
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(RED).add_modifier(Modifier::BOLD)),
+                .style(Style::default().add_modifier(Modifier::BOLD)),
             Rect {
                 x: left.x,
                 y: left.y + 7,
@@ -249,27 +248,53 @@ fn box_text(f: &mut ratatui::Frame, r: Rect, title: &str, text: String) {
         r,
     )
 }
-fn board_art(b: &Board, g: &Game) -> String {
-    let mut s = String::new();
+fn board_art(b: &Board, g: &Game) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let animation = g.clearing_animation();
     for y in HIDDEN_ROWS..HEIGHT {
+        let mut spans = Vec::new();
         for x in 0..WIDTH {
+            let fade_cell = animation.is_some_and(|(rows, elapsed)| {
+                rows.contains(&(y as usize)) && elapsed >= ((x as u32 + 1) * 25)
+            });
+            let clearing_cell = animation.is_some_and(|(rows, _)| rows.contains(&(y as usize)));
             let active = piece_cells(g.active.kind, g.active.rotation)
                 .iter()
                 .any(|&(dx, dy)| g.active.x + dx == x && g.active.y + dy == y);
             let ghost = piece_cells(g.active.kind, g.active.rotation)
                 .iter()
                 .any(|&(dx, dy)| g.active.x + dx == x && g.ghost_y() + dy == y);
-            s.push_str(if active || b.cell(x, y).is_some() {
-                "██"
+            let (cell, color) = if clearing_cell && !fade_cell {
+                ("██", Color::White)
+            } else if fade_cell {
+                ("··", RED)
+            } else if active || b.cell(x, y).is_some() {
+                ("██", RED)
             } else if ghost {
-                "░░"
+                ("░░", RED)
             } else {
-                "··"
-            });
+                ("··", RED)
+            };
+            spans.push(Span::styled(cell, Style::default().fg(color)));
         }
-        s.push('\n');
+        lines.push(Line::from(spans));
     }
-    s
+    lines
+}
+
+fn clear_notice_line(clear: dynamo_core::Clear, points: u32) -> Line<'static> {
+    let white = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    if clear == dynamo_core::Clear::TetraD {
+        Line::from(vec![
+            Span::styled("TETRA|", white),
+            Span::styled("D", Style::default().fg(RED).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  +{points}"), white),
+        ])
+    } else {
+        Line::from(Span::styled(format!("{}  +{points}", clear.label()), white))
+    }
 }
 fn piece_art(p: Option<PieceKind>) -> String {
     let Some(p) = p else { return "(EMPTY)".into() };

@@ -8,6 +8,7 @@ pub const HIDDEN_ROWS: i8 = 2;
 pub const TICK_HZ: u32 = 1_000;
 const LOCK_DELAY: u32 = 500;
 const CLEAR_DELAY: u32 = 500;
+const CLEAR_NOTICE_DELAY: u32 = 1_000;
 const DAS: u32 = 167;
 const ARR: u32 = 33;
 
@@ -167,6 +168,7 @@ pub struct Game {
     gravity: u32,
     lock: u32,
     clear_timer: u32,
+    clear_notice_timer: u32,
     pending_rows: Vec<usize>,
     hold_used: bool,
     left: bool,
@@ -194,6 +196,7 @@ impl Game {
             gravity: 0,
             lock: 0,
             clear_timer: 0,
+            clear_notice_timer: 0,
             pending_rows: vec![],
             hold_used: false,
             left: false,
@@ -242,9 +245,19 @@ impl Game {
         }
         self.active.y + d
     }
+    /// Rows currently in the 500 ms line-clear animation, with elapsed ticks.
+    pub fn clearing_animation(&self) -> Option<(&[usize], u32)> {
+        (self.phase == Phase::Clearing).then_some((&self.pending_rows, self.clear_timer))
+    }
     pub fn step(&mut self, command: Option<Command>) {
         if let Some(c) = command {
             self.command(c);
+        }
+        if self.clear_notice_timer > 0 {
+            self.clear_notice_timer -= 1;
+            if self.clear_notice_timer == 0 {
+                self.clear_notice = None;
+            }
         }
         if self.phase == Phase::Clearing {
             self.clear_timer += 1;
@@ -436,6 +449,7 @@ impl Game {
         self.score += gained as u64;
         self.back_to_back = t_spin || n == 4;
         self.clear_notice = Some((clear, gained));
+        self.clear_notice_timer = CLEAR_NOTICE_DELAY;
         self.pending_rows = rows;
         self.clear_timer = 0;
         self.phase = Phase::Clearing;
