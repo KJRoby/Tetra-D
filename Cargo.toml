@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/dynamo-core", "crates/dynamo-terminal"]
+members = ["crates/tetradynamo-core", "crates/tetrad-term"]
 resolver = "2"
 
 [workspace.package]

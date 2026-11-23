@@ -109,19 +109,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-core"
-version = "0.1.0"
-
-[[package]]
-name = "dynamo-terminal"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "dynamo-core",
- "ratatui",
-]
-
-[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -457,6 +444,19 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "tetrad-term"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "ratatui",
+ "tetradynamo-core",
+]
+
+[[package]]
+name = "tetradynamo-core"
+version = "0.1.0"
 
 [[package]]
 name = "unicode-ident"

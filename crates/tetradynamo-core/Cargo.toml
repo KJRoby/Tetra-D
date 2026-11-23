@@ -1,5 +1,5 @@
 [package]
-name = "dynamo-core"
+name = "tetradynamo-core"
 version.workspace = true
 edition.workspace = true
 

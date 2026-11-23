@@ -6,7 +6,7 @@ Ratatui/Crossterm terminal frontend.
 ## Run
 
 ```powershell
-cargo run -p dynamo-terminal
+cargo run -p tetrad-term
 ```
 
 The title screen uses a white `TETRA|` and red `D`. Gameplay is deliberately

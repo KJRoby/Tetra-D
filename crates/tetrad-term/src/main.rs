@@ -3,7 +3,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use dynamo_core::{
+use tetradynamo_core::{
     shape_cells, Board, Command, Game, Phase, PieceKind, HEIGHT, HIDDEN_ROWS, WIDTH,
 };
 use ratatui::{
@@ -282,16 +282,16 @@ fn board_art(b: &Board, g: &Game) -> Vec<Line<'static>> {
     lines
 }
 
-fn clear_notice_line(notice: dynamo_core::ClearNotice) -> Line<'static> {
+fn clear_notice_line(notice: tetradynamo_core::ClearNotice) -> Line<'static> {
     let white = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
     let prefix = match notice.spin {
-        Some(dynamo_core::Spin::Full) => "TSPIN ",
-        Some(dynamo_core::Spin::Mini) => "MINI TSPIN ",
+        Some(tetradynamo_core::Spin::Full) => "TSPIN ",
+        Some(tetradynamo_core::Spin::Mini) => "MINI TSPIN ",
         None => "",
     };
-    if notice.clear == dynamo_core::Clear::TetraD {
+    if notice.clear == tetradynamo_core::Clear::TetraD {
         return Line::from(vec![
             Span::styled(prefix.to_owned() + "TETRA|", white),
             Span::styled("D", Style::default().fg(RED).add_modifier(Modifier::BOLD)),
