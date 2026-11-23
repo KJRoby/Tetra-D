@@ -77,6 +77,21 @@ impl Clear {
     }
 }
 
+/// The recognized T-spin type on the piece that locked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Spin {
+    Full,
+    Mini,
+}
+
+/// Presentation data emitted when a line clear is locked in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClearNotice {
+    pub clear: Clear,
+    pub points: u32,
+    pub spin: Option<Spin>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActivePiece {
     pub kind: PieceKind,
@@ -84,6 +99,7 @@ pub struct ActivePiece {
     pub x: i8,
     pub y: i8,
     last_rotation: bool,
+    last_kick: (i8, i8),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Board {
@@ -161,7 +177,7 @@ pub struct Game {
     pub lines: u32,
     pub level: u32,
     pub elapsed_ticks: u64,
-    pub clear_notice: Option<(Clear, u32)>,
+    pub clear_notice: Option<ClearNotice>,
     pub combo: u32,
     pub back_to_back: bool,
     seed: u64,
@@ -386,6 +402,7 @@ impl Game {
                 self.active.y += dy;
                 self.active.rotation = next;
                 self.active.last_rotation = true;
+                self.active.last_kick = (*dx, *dy);
                 self.reset_lock();
                 break;
             }
@@ -419,7 +436,7 @@ impl Game {
         }
     }
     fn lock_piece(&mut self) {
-        let (t_spin, mini) = self.t_spin();
+        let spin = self.t_spin();
         self.board.lock(&self.active);
         self.lock = 0;
         self.lock_resets = 0;
@@ -440,24 +457,28 @@ impl Game {
         let gained = score_clear(
             n,
             self.level,
-            t_spin,
-            mini,
+            spin.is_some(),
+            spin == Some(Spin::Mini),
             self.combo,
             self.back_to_back,
             self.board.is_empty_after_removal(&rows),
         );
         self.score += gained as u64;
-        self.back_to_back = t_spin || n == 4;
-        self.clear_notice = Some((clear, gained));
+        self.back_to_back = spin.is_some() || n == 4;
+        self.clear_notice = Some(ClearNotice {
+            clear,
+            points: gained,
+            spin,
+        });
         self.clear_notice_timer = CLEAR_NOTICE_DELAY;
         self.pending_rows = rows;
         self.clear_timer = 0;
         self.phase = Phase::Clearing;
     }
 
-    fn t_spin(&self) -> (bool, bool) {
+    fn t_spin(&self) -> Option<Spin> {
         if self.active.kind != PieceKind::T || !self.active.last_rotation {
-            return (false, false);
+            return None;
         }
         let x = self.active.x + 1;
         let y = self.active.y + 1;
@@ -473,7 +494,7 @@ impl Game {
             .count()
             < 3
         {
-            return (false, false);
+            return None;
         }
         let front = match self.active.rotation {
             0 => [corners[0], corners[1]],
@@ -481,12 +502,15 @@ impl Game {
             2 => [corners[2], corners[3]],
             _ => [corners[0], corners[2]],
         };
-        (
-            true,
-            !front
+        if self.active.last_kick.1.abs() >= 2
+            || front
                 .iter()
-                .all(|&(x, y)| self.board.occupied_or_wall(x, y)),
-        )
+                .all(|&(x, y)| self.board.occupied_or_wall(x, y))
+        {
+            Some(Spin::Full)
+        } else {
+            Some(Spin::Mini)
+        }
     }
     fn spawn_next(&mut self) {
         if self.lines >= 150 {
@@ -547,6 +571,7 @@ fn spawn(kind: PieceKind) -> ActivePiece {
         x: 3,
         y: 0,
         last_rotation: false,
+        last_kick: (0, 0),
     }
 }
 pub fn shape_cells(k: PieceKind, r: u8) -> &'static [(i8, i8); 4] {
@@ -668,5 +693,30 @@ mod tests {
         assert_eq!(Clear::Dyad.label(), "DYAD");
         assert_eq!(Clear::Triad.label(), "TRIAD");
         assert_eq!(Clear::TetraD.label(), "TETRA|D");
+    }
+
+    #[test]
+    fn detects_full_and_mini_t_spins_from_corner_occupancy() {
+        let piece = ActivePiece {
+            kind: PieceKind::T,
+            rotation: 0,
+            x: 3,
+            y: 5,
+            last_rotation: true,
+            last_kick: (0, 0),
+        };
+        let mut full = Game::new(1);
+        full.active = piece;
+        for (x, y) in [(3, 5), (5, 5), (3, 7)] {
+            full.board.cells[y][x] = Some(PieceKind::I);
+        }
+        assert_eq!(full.t_spin(), Some(Spin::Full));
+
+        let mut mini = Game::new(1);
+        mini.active = piece;
+        for (x, y) in [(3, 5), (3, 7), (5, 7)] {
+            mini.board.cells[y][x] = Some(PieceKind::I);
+        }
+        assert_eq!(mini.t_spin(), Some(Spin::Mini));
     }
 }
