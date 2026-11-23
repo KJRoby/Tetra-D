@@ -9,6 +9,25 @@ Ratatui/Crossterm terminal frontend.
 cargo run -p tetrad-term
 ```
 
+## Python and Pygame
+
+The Python bindings are built from `crates/tetrad-python` with Maturin and
+expose the `tetradynamo` module. They are the only game-state dependency of
+the Pygame frontend.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install maturin
+maturin develop --manifest-path crates/tetrad-python/Cargo.toml
+python -m pip install -r frontends/pygame/requirements.txt
+python frontends/pygame/main.py
+```
+
+`Game.step(commands)` accepts an ordered batch of lowercase commands such as
+`"rotate_cw"` and `"hard_drop"`, advances exactly one 1,000 Hz simulation
+tick, and returns events plus a read-only snapshot dictionary.
+
 The title screen uses a white `TETRA|` and red `D`. Gameplay is deliberately
 monochrome red (`#FF0000`) on black, with HOLD to the left of the well, five
 NEXT previews to the right, and controls in the lower-right corner.

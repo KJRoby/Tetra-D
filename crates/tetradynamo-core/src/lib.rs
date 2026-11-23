@@ -1,18 +1,17 @@
-//! Deterministic falling-block simulation for Tetra|D.
-
+//! Deterministic, frontend-independent falling-block simulation.
 use std::collections::VecDeque;
-
 pub const WIDTH: i8 = 10;
 pub const HEIGHT: i8 = 22;
 pub const HIDDEN_ROWS: i8 = 2;
-pub const TICK_HZ: u32 = 1_000;
+pub const TICK_HZ: u32 = 1000;
+pub const MAX_COMMANDS_PER_TICK: usize = 32;
 const LOCK_DELAY: u32 = 500;
 const CLEAR_DELAY: u32 = 500;
-const CLEAR_NOTICE_DELAY: u32 = 1_000;
+const NOTICE_DELAY: u32 = 1000;
 const DAS: u32 = 167;
 const ARR: u32 = 33;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PieceKind {
     I,
     J,
@@ -32,8 +31,18 @@ impl PieceKind {
         Self::T,
         Self::Z,
     ];
+    fn id(self) -> u8 {
+        match self {
+            Self::I => 0,
+            Self::J => 1,
+            Self::L => 2,
+            Self::O => 3,
+            Self::S => 4,
+            Self::T => 5,
+            Self::Z => 6,
+        }
+    }
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     LeftPress,
@@ -47,6 +56,7 @@ pub enum Command {
     HardDrop,
     Hold,
     Pause,
+    Resume,
     Start,
     Restart,
 }
@@ -76,22 +86,17 @@ impl Clear {
         }
     }
 }
-
-/// The recognized T-spin type on the piece that locked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spin {
     Full,
     Mini,
 }
-
-/// Presentation data emitted when a line clear is locked in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClearNotice {
     pub clear: Clear,
     pub points: u32,
     pub spin: Option<Spin>,
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActivePiece {
     pub kind: PieceKind,
@@ -120,176 +125,371 @@ impl Board {
             None
         }
     }
-    fn collides(&self, p: &ActivePiece, dx: i8, dy: i8, rot: u8) -> bool {
-        cells(p.kind, rot).iter().any(|&(cx, cy)| {
-            let x = p.x + dx + cx;
-            let y = p.y + dy + cy;
+    pub fn cells(&self) -> &[[Option<PieceKind>; WIDTH as usize]; HEIGHT as usize] {
+        &self.cells
+    }
+    fn hit(&self, p: &ActivePiece, dx: i8, dy: i8, r: u8) -> bool {
+        shape_cells(p.kind, r).iter().any(|&(cx, cy)| {
+            let (x, y) = (p.x + dx + cx, p.y + dy + cy);
             !(0..WIDTH).contains(&x)
                 || y >= HEIGHT
                 || (y >= 0 && self.cells[y as usize][x as usize].is_some())
         })
     }
     fn lock(&mut self, p: &ActivePiece) {
-        for &(cx, cy) in cells(p.kind, p.rotation) {
-            let (x, y) = (p.x + cx, p.y + cy);
+        for &(dx, dy) in shape_cells(p.kind, p.rotation) {
+            let (x, y) = (p.x + dx, p.y + dy);
             if (0..WIDTH).contains(&x) && (0..HEIGHT).contains(&y) {
-                self.cells[y as usize][x as usize] = Some(p.kind);
+                self.cells[y as usize][x as usize] = Some(p.kind)
             }
         }
     }
-    fn full_rows(&self) -> Vec<usize> {
+    fn full(&self) -> Vec<usize> {
         (0..HEIGHT as usize)
             .filter(|&y| self.cells[y].iter().all(Option::is_some))
             .collect()
     }
     fn remove(&mut self, rows: &[usize]) {
-        let mut kept: Vec<_> = (0..HEIGHT as usize)
+        let mut v: Vec<_> = (0..HEIGHT as usize)
             .filter(|y| !rows.contains(y))
             .map(|y| self.cells[y])
             .collect();
-        while kept.len() < HEIGHT as usize {
-            kept.insert(0, [None; WIDTH as usize]);
+        while v.len() < HEIGHT as usize {
+            v.insert(0, [None; WIDTH as usize])
         }
-        self.cells.copy_from_slice(&kept);
+        self.cells.copy_from_slice(&v)
     }
-    fn is_empty_after_removal(&self, rows: &[usize]) -> bool {
+    fn empty_after(&self, rows: &[usize]) -> bool {
         self.cells
             .iter()
             .enumerate()
             .filter(|(y, _)| !rows.contains(y))
-            .all(|(_, row)| row.iter().all(Option::is_none))
+            .all(|(_, r)| r.iter().all(Option::is_none))
     }
-    fn occupied_or_wall(&self, x: i8, y: i8) -> bool {
+    fn occupied(&self, x: i8, y: i8) -> bool {
         !(0..WIDTH).contains(&x)
             || !(0..HEIGHT).contains(&y)
             || self.cells[y as usize][x as usize].is_some()
     }
 }
-
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GameEvent {
+    Started,
+    Restarted {
+        seed: u64,
+    },
+    Paused,
+    Resumed,
+    Spawned {
+        kind: PieceKind,
+    },
+    Moved {
+        dx: i8,
+        dy: i8,
+    },
+    Rotated {
+        rotation: u8,
+        kick: (i8, i8),
+    },
+    Held {
+        outgoing: PieceKind,
+        incoming: PieceKind,
+        hold: Option<PieceKind>,
+    },
+    HardDropped {
+        distance: u8,
+    },
+    Locked {
+        kind: PieceKind,
+    },
+    LinesCleared {
+        rows: Vec<u8>,
+        clear: Clear,
+        spin: Option<Spin>,
+    },
+    ScoreAwarded {
+        points: u32,
+        total: u64,
+    },
+    LevelChanged {
+        from: u32,
+        to: u32,
+    },
+    Combo {
+        count: u32,
+    },
+    BackToBack {
+        active: bool,
+    },
+    GameOver,
+    Completed,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StepError {
+    TooManyCommands { received: usize, maximum: usize },
+}
+#[derive(Clone, Debug)]
+pub struct StepResult {
+    pub events: Vec<GameEvent>,
+    pub snapshot: GameSnapshot,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Timers {
+    pub simulation_ticks: u64,
+    pub active_gameplay_ticks: u64,
+    pub mode_elapsed_ticks: u64,
+    pub gravity_ticks: u32,
+    pub lock_ticks: u32,
+    pub clear_ticks: u32,
+    pub clear_notice_ticks: u32,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GameSnapshot {
+    pub board: [[Option<PieceKind>; WIDTH as usize]; HEIGHT as usize],
+    pub active: ActivePiece,
+    pub ghost_y: i8,
+    pub hold: Option<PieceKind>,
+    pub next: Vec<PieceKind>,
+    pub phase: Phase,
+    pub score: u64,
+    pub lines: u32,
+    pub level: u32,
+    pub combo: u32,
+    pub back_to_back: bool,
+    pub gravity_cps: u32,
+    pub clear_notice: Option<ClearNotice>,
+    pub clearing_rows: Vec<u8>,
+    pub timers: Timers,
+}
 #[derive(Clone, Debug)]
 pub struct Game {
     pub board: Board,
     pub active: ActivePiece,
-    pub queue: VecDeque<PieceKind>,
     pub hold: Option<PieceKind>,
     pub phase: Phase,
     pub score: u64,
     pub lines: u32,
     pub level: u32,
-    pub elapsed_ticks: u64,
-    pub clear_notice: Option<ClearNotice>,
     pub combo: u32,
     pub back_to_back: bool,
-    seed: u64,
+    initial_seed: u64,
+    rng: u64,
+    queue: VecDeque<PieceKind>,
+    sim: u64,
+    active_time: u64,
+    mode_time: u64,
     gravity: u32,
     lock: u32,
-    clear_timer: u32,
-    clear_notice_timer: u32,
-    pending_rows: Vec<usize>,
+    clear: u32,
+    notice_time: u32,
+    pending: Vec<usize>,
+    pub clear_notice: Option<ClearNotice>,
     hold_used: bool,
     left: bool,
     right: bool,
     soft: bool,
     horizontal: u32,
-    lock_resets: u8,
+    resets: u8,
 }
 impl Game {
     pub fn new(seed: u64) -> Self {
         let mut g = Self {
             board: Board::default(),
-            active: spawn(PieceKind::T),
-            queue: VecDeque::new(),
+            active: piece(PieceKind::T),
             hold: None,
             phase: Phase::Title,
             score: 0,
             lines: 0,
             level: 1,
-            elapsed_ticks: 0,
-            clear_notice: None,
             combo: 0,
             back_to_back: false,
-            seed,
+            initial_seed: seed,
+            rng: seed_rng(seed),
+            queue: VecDeque::new(),
+            sim: 0,
+            active_time: 0,
+            mode_time: 0,
             gravity: 0,
             lock: 0,
-            clear_timer: 0,
-            clear_notice_timer: 0,
-            pending_rows: vec![],
+            clear: 0,
+            notice_time: 0,
+            pending: vec![],
+            clear_notice: None,
             hold_used: false,
             left: false,
             right: false,
             soft: false,
             horizontal: 0,
-            lock_resets: 0,
+            resets: 0,
         };
-        g.fill_queue();
-        g.active = spawn(g.take());
+        g.fill();
+        g.active = piece(g.take());
         g
     }
-    fn random(&mut self) -> u64 {
-        self.seed ^= self.seed << 13;
-        self.seed ^= self.seed >> 7;
-        self.seed ^= self.seed << 17;
-        self.seed
-    }
-    fn fill_queue(&mut self) {
-        while self.queue.len() < 7 {
-            let mut bag = PieceKind::ALL;
-            for i in (1..7).rev() {
-                let j = (self.random() % (i as u64 + 1)) as usize;
-                bag.swap(i, j);
-            }
-            self.queue.extend(bag);
-        }
-    }
-    fn take(&mut self) -> PieceKind {
-        self.fill_queue();
-        self.queue.pop_front().unwrap()
+    pub fn initial_seed(&self) -> u64 {
+        self.initial_seed
     }
     pub fn next(&self) -> impl Iterator<Item = PieceKind> + '_ {
         self.queue.iter().copied()
     }
     pub fn gravity_cps(&self) -> u32 {
-        (1_000 / gravity_ms(self.level)).max(1)
+        (1000 / gravity_ms(self.level)).max(1)
     }
     pub fn ghost_y(&self) -> i8 {
         let mut d = 0;
-        while !self
-            .board
-            .collides(&self.active, 0, d + 1, self.active.rotation)
-        {
-            d += 1;
+        while !self.board.hit(&self.active, 0, d + 1, self.active.rotation) {
+            d += 1
         }
         self.active.y + d
     }
-    /// Rows currently in the 500 ms line-clear animation, with elapsed ticks.
     pub fn clearing_animation(&self) -> Option<(&[usize], u32)> {
-        (self.phase == Phase::Clearing).then_some((&self.pending_rows, self.clear_timer))
+        (self.phase == Phase::Clearing).then_some((&self.pending, self.clear))
     }
-    pub fn step(&mut self, command: Option<Command>) {
-        if let Some(c) = command {
-            self.command(c);
+    pub fn snapshot(&self) -> GameSnapshot {
+        GameSnapshot {
+            board: *self.board.cells(),
+            active: self.active,
+            ghost_y: self.ghost_y(),
+            hold: self.hold,
+            next: self.next().collect(),
+            phase: self.phase,
+            score: self.score,
+            lines: self.lines,
+            level: self.level,
+            combo: self.combo,
+            back_to_back: self.back_to_back,
+            gravity_cps: self.gravity_cps(),
+            clear_notice: self.clear_notice,
+            clearing_rows: self.pending.iter().map(|&r| r as u8).collect(),
+            timers: Timers {
+                simulation_ticks: self.sim,
+                active_gameplay_ticks: self.active_time,
+                mode_elapsed_ticks: self.mode_time,
+                gravity_ticks: self.gravity,
+                lock_ticks: self.lock,
+                clear_ticks: self.clear,
+                clear_notice_ticks: self.notice_time,
+            },
         }
-        if self.clear_notice_timer > 0 {
-            self.clear_notice_timer -= 1;
-            if self.clear_notice_timer == 0 {
-                self.clear_notice = None;
+    }
+    pub fn state_hash(&self) -> u64 {
+        let s = self.snapshot();
+        let mut h = 0xcbf29ce484222325u64;
+        let mut put = |x: u64| {
+            h ^= x;
+            h = h.wrapping_mul(0x100000001b3)
+        };
+        put(s.phase as u64);
+        put(s.score);
+        put(s.lines as u64);
+        put(s.level as u64);
+        put(s.active.kind.id() as u64);
+        put(s.active.rotation as u64);
+        put(s.active.x as u64);
+        put(s.active.y as u64);
+        for r in s.board {
+            for c in r {
+                put(c.map_or(255, |p| p.id()) as u64)
             }
         }
-        if self.phase == Phase::Clearing {
-            self.clear_timer += 1;
-            if self.clear_timer >= CLEAR_DELAY {
-                self.board.remove(&self.pending_rows);
-                self.lines += self.pending_rows.len() as u32;
-                self.level = (1 + self.lines / 10).min(15);
-                self.spawn_next();
+        for p in s.next {
+            put(p.id() as u64)
+        }
+        h
+    }
+    pub fn restart(&mut self) -> StepResult {
+        let seed = self.initial_seed;
+        *self = Self::new(seed);
+        StepResult {
+            events: vec![
+                GameEvent::Restarted { seed },
+                GameEvent::Spawned {
+                    kind: self.active.kind,
+                },
+            ],
+            snapshot: self.snapshot(),
+        }
+    }
+    pub fn step(&mut self, commands: &[Command]) -> Result<StepResult, StepError> {
+        if commands.len() > MAX_COMMANDS_PER_TICK {
+            return Err(StepError::TooManyCommands {
+                received: commands.len(),
+                maximum: MAX_COMMANDS_PER_TICK,
+            });
+        }
+        let mut e = Vec::with_capacity(commands.len() + 8);
+        for &c in commands {
+            self.command(c, &mut e)
+        }
+        self.sim += 1;
+        if self.notice_time > 0 {
+            self.notice_time -= 1;
+            if self.notice_time == 0 {
+                self.clear_notice = None
             }
-            return;
         }
-        if self.phase != Phase::Falling {
-            return;
+        match self.phase {
+            Phase::Falling => self.falling(&mut e),
+            Phase::Clearing => self.clearing(&mut e),
+            _ => {}
         }
-        self.elapsed_ticks += 1;
-        self.horizontal_step();
+        Ok(StepResult {
+            events: e,
+            snapshot: self.snapshot(),
+        })
+    }
+    fn command(&mut self, c: Command, e: &mut Vec<GameEvent>) {
+        match c {
+            Command::Start if self.phase == Phase::Title => {
+                self.phase = Phase::Falling;
+                e.push(GameEvent::Started);
+                e.push(GameEvent::Spawned {
+                    kind: self.active.kind,
+                })
+            }
+            Command::Restart if matches!(self.phase, Phase::GameOver | Phase::Complete) => {
+                e.extend(self.restart().events)
+            }
+            Command::Pause if self.phase == Phase::Falling => {
+                self.phase = Phase::Paused;
+                self.clear_input();
+                e.push(GameEvent::Paused)
+            }
+            Command::Resume if self.phase == Phase::Paused => {
+                self.phase = Phase::Falling;
+                e.push(GameEvent::Resumed)
+            }
+            Command::LeftRelease => self.left = false,
+            Command::RightRelease => self.right = false,
+            Command::SoftDropRelease => self.soft = false,
+            _ if self.phase != Phase::Falling => {}
+            Command::LeftPress => {
+                self.left = true;
+                self.horizontal = 0;
+                self.move_x(-1, e)
+            }
+            Command::RightPress => {
+                self.right = true;
+                self.horizontal = 0;
+                self.move_x(1, e)
+            }
+            Command::SoftDropPress => {
+                if !self.soft {
+                    self.soft = true;
+                    self.down(true, e)
+                }
+            }
+            Command::RotateCw => self.rotate(1, e),
+            Command::RotateCcw => self.rotate(3, e),
+            Command::HardDrop => self.hard_drop(e),
+            Command::Hold => self.hold_piece(e),
+            _ => {}
+        }
+    }
+    fn falling(&mut self, e: &mut Vec<GameEvent>) {
+        self.active_time += 1;
+        self.mode_time += 1;
+        self.repeat(e);
         let interval = if self.soft {
             (gravity_ms(self.level) / 20).max(17)
         } else {
@@ -298,152 +498,144 @@ impl Game {
         self.gravity += 1;
         if self.gravity >= interval {
             self.gravity -= interval;
-            self.down(false);
+            self.down(false, e)
         }
-        if self
-            .board
-            .collides(&self.active, 0, 1, self.active.rotation)
-        {
+        if self.board.hit(&self.active, 0, 1, self.active.rotation) {
             self.lock += 1;
             if self.lock >= LOCK_DELAY {
-                self.lock_piece();
+                self.lock_piece(e)
             }
         } else {
-            self.lock = 0;
+            self.lock = 0
         }
     }
-    fn command(&mut self, c: Command) {
-        match c {
-            Command::Start if self.phase == Phase::Title => self.phase = Phase::Falling,
-            Command::Restart if matches!(self.phase, Phase::GameOver | Phase::Complete) => {
-                *self = Self::new(self.seed)
+    fn clearing(&mut self, e: &mut Vec<GameEvent>) {
+        self.mode_time += 1;
+        self.clear += 1;
+        if self.clear >= CLEAR_DELAY {
+            let n = self.pending.len() as u32;
+            self.board.remove(&self.pending);
+            self.pending.clear();
+            self.lines += n;
+            let old = self.level;
+            self.level = (1 + self.lines / 10).min(15);
+            if old != self.level {
+                e.push(GameEvent::LevelChanged {
+                    from: old,
+                    to: self.level,
+                })
             }
-            Command::Pause if self.phase == Phase::Falling => self.phase = Phase::Paused,
-            Command::Pause if self.phase == Phase::Paused => self.phase = Phase::Falling,
-            Command::LeftPress => {
-                self.left = true;
-                self.horizontal = 0;
-                self.move_x(-1)
-            }
-            Command::RightPress => {
-                self.right = true;
-                self.horizontal = 0;
-                self.move_x(1)
-            }
-            Command::LeftRelease => self.left = false,
-            Command::RightRelease => self.right = false,
-            Command::SoftDropPress => {
-                self.soft = true;
-                self.down(true)
-            }
-            Command::SoftDropRelease => self.soft = false,
-            Command::RotateCw => self.rotate(1),
-            Command::RotateCcw => self.rotate(3),
-            Command::HardDrop => {
-                if self.phase == Phase::Falling {
-                    let y = self.ghost_y();
-                    let d = (y - self.active.y) as u64;
-                    self.active.y = y;
-                    self.score += d * 2;
-                    self.lock_piece();
-                }
-            }
-            Command::Hold => self.hold(),
-            _ => {}
+            let next = self.take();
+            self.activate(next, e)
         }
     }
-    fn horizontal_step(&mut self) {
-        let dir = if self.left {
+    fn repeat(&mut self, e: &mut Vec<GameEvent>) {
+        let d = if self.left {
             Some(-1)
         } else if self.right {
             Some(1)
         } else {
             None
         };
-        let Some(dir) = dir else { return };
+        let Some(d) = d else { return };
         self.horizontal += 1;
         if self.horizontal == DAS
             || (self.horizontal > DAS && (self.horizontal - DAS).is_multiple_of(ARR))
         {
-            self.move_x(dir);
+            self.move_x(d, e)
         }
     }
-    fn move_x(&mut self, dx: i8) {
-        if self.phase == Phase::Falling
-            && !self
-                .board
-                .collides(&self.active, dx, 0, self.active.rotation)
-        {
+    fn move_x(&mut self, dx: i8, e: &mut Vec<GameEvent>) {
+        if !self.board.hit(&self.active, dx, 0, self.active.rotation) {
             self.active.x += dx;
             self.active.last_rotation = false;
             self.reset_lock();
+            e.push(GameEvent::Moved { dx, dy: 0 })
         }
     }
-    fn down(&mut self, points: bool) {
-        if !self
-            .board
-            .collides(&self.active, 0, 1, self.active.rotation)
-        {
+    fn down(&mut self, points: bool, e: &mut Vec<GameEvent>) {
+        if !self.board.hit(&self.active, 0, 1, self.active.rotation) {
             self.active.y += 1;
-            if points {
-                self.score += 1
-            };
             self.lock = 0;
+            e.push(GameEvent::Moved { dx: 0, dy: 1 });
+            if points {
+                self.award(1, e)
+            }
         }
     }
-    fn rotate(&mut self, dir: u8) {
-        if self.phase != Phase::Falling {
-            return;
-        }
+    fn rotate(&mut self, dir: u8, e: &mut Vec<GameEvent>) {
         let next = (self.active.rotation + dir) % 4;
         for (dx, dy) in kicks(self.active.kind, self.active.rotation, next) {
-            if !self.board.collides(&self.active, *dx, *dy, next) {
+            if !self.board.hit(&self.active, *dx, *dy, next) {
                 self.active.x += dx;
                 self.active.y += dy;
                 self.active.rotation = next;
                 self.active.last_rotation = true;
                 self.active.last_kick = (*dx, *dy);
                 self.reset_lock();
+                e.push(GameEvent::Rotated {
+                    rotation: next,
+                    kick: (*dx, *dy),
+                });
                 break;
             }
         }
     }
-    fn reset_lock(&mut self) {
-        if self
-            .board
-            .collides(&self.active, 0, 1, self.active.rotation)
-            && self.lock_resets < 15
-        {
-            self.lock = 0;
-            self.lock_resets += 1;
-        }
+    fn hard_drop(&mut self, e: &mut Vec<GameEvent>) {
+        let y = self.ghost_y();
+        let d = (y - self.active.y) as u8;
+        self.active.y = y;
+        e.push(GameEvent::HardDropped { distance: d });
+        self.award(d as u32 * 2, e);
+        self.lock_piece(e)
     }
-    fn hold(&mut self) {
-        if self.phase != Phase::Falling || self.hold_used {
+    fn hold_piece(&mut self, e: &mut Vec<GameEvent>) {
+        if self.hold_used {
             return;
         }
-        self.hold_used = true;
-        let current = self.active.kind;
-        self.active = spawn(match self.hold.replace(current) {
-            Some(k) => k,
+        let outgoing = self.active.kind;
+        let incoming = match self.hold.replace(outgoing) {
+            Some(x) => x,
             None => self.take(),
+        };
+        self.activate_raw(incoming);
+        self.hold_used = true;
+        e.push(GameEvent::Held {
+            outgoing,
+            incoming,
+            hold: self.hold,
         });
-        if self
-            .board
-            .collides(&self.active, 0, 0, self.active.rotation)
-        {
-            self.phase = Phase::GameOver;
+        if self.phase == Phase::GameOver {
+            e.push(GameEvent::GameOver)
         }
     }
-    fn lock_piece(&mut self) {
+    fn lock_piece(&mut self, e: &mut Vec<GameEvent>) {
         let spin = self.t_spin();
         self.board.lock(&self.active);
+        e.push(GameEvent::Locked {
+            kind: self.active.kind,
+        });
         self.lock = 0;
-        self.lock_resets = 0;
-        let rows = self.board.full_rows();
+        self.resets = 0;
+        let rows = self.board.full();
         if rows.is_empty() {
             self.combo = 0;
-            self.spawn_next();
+            if spin.is_some() {
+                self.award(
+                    score(
+                        0,
+                        self.level,
+                        true,
+                        spin == Some(Spin::Mini),
+                        0,
+                        self.back_to_back,
+                        false,
+                    ),
+                    e,
+                )
+            }
+            let next = self.take();
+            self.activate(next, e);
             return;
         }
         let n = rows.len() as u32;
@@ -454,119 +646,175 @@ impl Game {
             _ => Clear::TetraD,
         };
         self.combo += 1;
-        let gained = score_clear(
+        let points = score(
             n,
             self.level,
             spin.is_some(),
             spin == Some(Spin::Mini),
             self.combo,
             self.back_to_back,
-            self.board.is_empty_after_removal(&rows),
+            self.board.empty_after(&rows),
         );
-        self.score += gained as u64;
-        self.back_to_back = spin.is_some() || n == 4;
-        self.clear_notice = Some(ClearNotice {
+        self.award(points, e);
+        e.push(GameEvent::LinesCleared {
+            rows: rows.iter().map(|&r| r as u8).collect(),
             clear,
-            points: gained,
             spin,
         });
-        self.clear_notice_timer = CLEAR_NOTICE_DELAY;
-        self.pending_rows = rows;
-        self.clear_timer = 0;
-        self.phase = Phase::Clearing;
+        e.push(GameEvent::Combo { count: self.combo });
+        let b = spin.is_some() || n == 4;
+        if b != self.back_to_back {
+            e.push(GameEvent::BackToBack { active: b })
+        }
+        self.back_to_back = b;
+        self.clear_notice = Some(ClearNotice {
+            clear,
+            points,
+            spin,
+        });
+        self.notice_time = NOTICE_DELAY;
+        self.pending = rows;
+        self.clear = 0;
+        self.phase = Phase::Clearing
     }
-
+    fn activate_raw(&mut self, k: PieceKind) {
+        self.active = piece(k);
+        self.gravity = 0;
+        self.lock = 0;
+        self.resets = 0;
+        self.horizontal = 0;
+        self.hold_used = false;
+        self.phase = if self.board.hit(&self.active, 0, 0, 0) {
+            Phase::GameOver
+        } else {
+            Phase::Falling
+        }
+    }
+    fn activate(&mut self, k: PieceKind, e: &mut Vec<GameEvent>) {
+        if self.lines >= 150 {
+            self.phase = Phase::Complete;
+            e.push(GameEvent::Completed);
+            return;
+        }
+        self.activate_raw(k);
+        if self.phase == Phase::GameOver {
+            e.push(GameEvent::GameOver)
+        } else {
+            e.push(GameEvent::Spawned { kind: k })
+        }
+    }
+    fn reset_lock(&mut self) {
+        if self.board.hit(&self.active, 0, 1, self.active.rotation) && self.resets < 15 {
+            self.lock = 0;
+            self.resets += 1
+        }
+    }
+    fn award(&mut self, p: u32, e: &mut Vec<GameEvent>) {
+        if p > 0 {
+            self.score += p as u64;
+            e.push(GameEvent::ScoreAwarded {
+                points: p,
+                total: self.score,
+            })
+        }
+    }
     fn t_spin(&self) -> Option<Spin> {
         if self.active.kind != PieceKind::T || !self.active.last_rotation {
             return None;
         }
-        let x = self.active.x + 1;
-        let y = self.active.y + 1;
-        let corners = [
+        let (x, y) = (self.active.x + 1, self.active.y + 1);
+        let c = [
             (x - 1, y - 1),
             (x + 1, y - 1),
             (x - 1, y + 1),
             (x + 1, y + 1),
         ];
-        if corners
-            .iter()
-            .filter(|&&(x, y)| self.board.occupied_or_wall(x, y))
+        if c.iter()
+            .filter(|&&(x, y)| self.board.occupied(x, y))
             .count()
             < 3
         {
             return None;
         }
-        let front = match self.active.rotation {
-            0 => [corners[0], corners[1]],
-            1 => [corners[1], corners[3]],
-            2 => [corners[2], corners[3]],
-            _ => [corners[0], corners[2]],
+        let f = match self.active.rotation {
+            0 => [c[0], c[1]],
+            1 => [c[1], c[3]],
+            2 => [c[2], c[3]],
+            _ => [c[0], c[2]],
         };
-        if self.active.last_kick.1.abs() >= 2
-            || front
-                .iter()
-                .all(|&(x, y)| self.board.occupied_or_wall(x, y))
-        {
+        if self.active.last_kick.1.abs() >= 2 || f.iter().all(|&(x, y)| self.board.occupied(x, y)) {
             Some(Spin::Full)
         } else {
             Some(Spin::Mini)
         }
     }
-    fn spawn_next(&mut self) {
-        if self.lines >= 150 {
-            self.phase = Phase::Complete;
-            return;
+    fn clear_input(&mut self) {
+        self.left = false;
+        self.right = false;
+        self.soft = false;
+        self.horizontal = 0
+    }
+    fn random(&mut self) -> u64 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        self.rng
+    }
+    fn fill(&mut self) {
+        while self.queue.len() < 7 {
+            let mut b = PieceKind::ALL;
+            for i in (1..7).rev() {
+                let j = (self.random() % (i as u64 + 1)) as usize;
+                b.swap(i, j)
+            }
+            self.queue.extend(b)
         }
-        self.active = spawn(self.take());
-        self.hold_used = false;
-        self.gravity = 0;
-        self.phase = if self
-            .board
-            .collides(&self.active, 0, 0, self.active.rotation)
-        {
-            Phase::GameOver
-        } else {
-            Phase::Falling
-        };
+    }
+    fn take(&mut self) -> PieceKind {
+        self.fill();
+        self.queue.pop_front().unwrap()
     }
 }
-
-fn score_clear(
-    lines: u32,
-    level: u32,
-    t_spin: bool,
-    mini: bool,
-    combo: u32,
-    b2b: bool,
-    perfect: bool,
-) -> u32 {
-    let mut base = if t_spin {
-        [400, 800, 1200, 1600][lines as usize]
+fn seed_rng(s: u64) -> u64 {
+    let mut z = s.wrapping_add(0x9e3779b97f4a7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    let z = z ^ (z >> 31);
+    if z == 0 {
+        1
     } else {
-        [0, 100, 300, 500, 800][lines as usize]
+        z
+    }
+}
+fn score(n: u32, l: u32, t: bool, m: bool, c: u32, b: bool, p: bool) -> u32 {
+    let mut x = if t {
+        [400, 800, 1200, 1600][n.min(3) as usize]
+    } else {
+        [0, 100, 300, 500, 800][n as usize]
     };
-    if t_spin && mini {
-        base = 100 + [0, 100, 300, 0][lines as usize];
+    if t && m {
+        x = 100 + [0, 100, 300, 0][n.min(3) as usize]
     }
-    let mut points = base * level;
-    if b2b && (t_spin || lines == 4) {
-        points = points * 3 / 2;
+    let mut x = x * l;
+    if b && (t || n == 4) {
+        x = x * 3 / 2
     }
-    if combo >= 2 {
-        points += 50 * (combo - 1) * level;
+    if c >= 2 {
+        x += 50 * (c - 1) * l
     }
-    if perfect {
-        points += [0, 800, 1000, 1800, 2000][lines as usize] * level;
+    if p {
+        x += [0, 800, 1000, 1800, 2000][n as usize] * l
     }
-    points
+    x
 }
-fn gravity_ms(level: u32) -> u32 {
-    let l = level.max(1) as f64;
-    ((0.8 - (l - 1.0) * 0.007).powf(l - 1.0) * 1000.0).round() as u32
+fn gravity_ms(l: u32) -> u32 {
+    [
+        1000, 793, 618, 473, 355, 262, 190, 135, 94, 64, 43, 28, 18, 11, 7,
+    ][l.saturating_sub(1).min(14) as usize]
 }
-fn spawn(kind: PieceKind) -> ActivePiece {
+fn piece(k: PieceKind) -> ActivePiece {
     ActivePiece {
-        kind,
+        kind: k,
         rotation: 0,
         x: 3,
         y: 0,
@@ -622,10 +870,7 @@ pub fn shape_cells(k: PieceKind, r: u8) -> &'static [(i8, i8); 4] {
         PieceKind::T => &T[r as usize],
     }
 }
-fn cells(k: PieceKind, r: u8) -> &'static [(i8, i8); 4] {
-    shape_cells(k, r)
-}
-fn kicks(k: PieceKind, from: u8, to: u8) -> &'static [(i8, i8)] {
+fn kicks(k: PieceKind, f: u8, t: u8) -> &'static [(i8, i8)] {
     const A: &[(i8, i8)] = &[(0, 0), (-1, 0), (-1, -1), (0, 2), (-1, 2)];
     const B: &[(i8, i8)] = &[(0, 0), (1, 0), (1, 1), (0, -2), (1, -2)];
     const C: &[(i8, i8)] = &[(0, 0), (1, 0), (1, -1), (0, 2), (1, 2)];
@@ -637,7 +882,7 @@ fn kicks(k: PieceKind, from: u8, to: u8) -> &'static [(i8, i8)] {
     if k == PieceKind::O {
         return &[(0, 0)];
     }
-    match (k == PieceKind::I, from, to) {
+    match (k == PieceKind::I, f, t) {
         (false, 0, 1) | (false, 2, 1) => A,
         (false, 1, 0) | (false, 1, 2) => B,
         (false, 2, 3) | (false, 0, 3) => C,
@@ -653,70 +898,82 @@ fn kicks(k: PieceKind, from: u8, to: u8) -> &'static [(i8, i8)] {
         _ => &[(0, 0)],
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn seeded_queue_is_a_bag() {
-        let g = Game::new(4);
-        let mut v: Vec<_> = g.next().take(6).collect();
-        v.push(g.active.kind);
-        assert_eq!(v.len(), 7);
-        assert!(PieceKind::ALL.iter().all(|k| v.contains(k)));
+    fn zero_seed_bag() {
+        let a = Game::new(0);
+        let v: Vec<_> = a
+            .next()
+            .take(6)
+            .chain(std::iter::once(a.active.kind))
+            .collect();
+        assert!(PieceKind::ALL.iter().all(|x| v.contains(x)))
     }
     #[test]
-    fn title_starts_game() {
+    fn one_tick_for_batch() {
         let mut g = Game::new(1);
-        g.step(Some(Command::Start));
-        assert_eq!(g.phase, Phase::Falling);
+        g.step(&[Command::Start]).unwrap();
+        let n = g.snapshot().timers.simulation_ticks;
+        g.step(&[Command::RotateCw, Command::HardDrop]).unwrap();
+        assert_eq!(g.snapshot().timers.simulation_ticks, n + 1)
     }
     #[test]
-    fn hard_drop_locks() {
-        let mut g = Game::new(1);
-        g.step(Some(Command::Start));
-        g.step(Some(Command::HardDrop));
-        assert!(g.board.cells.iter().flatten().any(Option::is_some));
+    fn restart_is_seeded() {
+        let mut g = Game::new(0);
+        g.phase = Phase::GameOver;
+        g.restart();
+        assert_eq!(g.state_hash(), Game::new(0).state_hash())
     }
-
     #[test]
-    fn guideline_scoring_includes_combo_b2b_and_perfect_clear() {
-        assert_eq!(score_clear(1, 1, false, false, 1, false, false), 100);
-        assert_eq!(score_clear(4, 1, false, false, 2, true, false), 1250);
-        assert_eq!(score_clear(4, 1, false, false, 1, false, true), 2800);
-        assert_eq!(score_clear(2, 1, true, false, 1, false, false), 1200);
+    fn oversized_batch_is_rejected_without_advancing() {
+        let mut game = Game::new(7);
+        let commands = vec![Command::RotateCw; MAX_COMMANDS_PER_TICK + 1];
+        assert!(matches!(
+            game.step(&commands),
+            Err(StepError::TooManyCommands { .. })
+        ));
+        assert_eq!(game.snapshot().timers.simulation_ticks, 0);
     }
-
     #[test]
-    fn custom_clear_names_are_stable() {
-        assert_eq!(Clear::Monad.label(), "MONAD");
-        assert_eq!(Clear::Dyad.label(), "DYAD");
-        assert_eq!(Clear::Triad.label(), "TRIAD");
-        assert_eq!(Clear::TetraD.label(), "TETRA|D");
+    fn pause_clears_latched_input() {
+        let mut game = Game::new(7);
+        game.step(&[
+            Command::Start,
+            Command::LeftPress,
+            Command::SoftDropPress,
+            Command::Pause,
+        ])
+        .unwrap();
+        assert!(!game.left && !game.right && !game.soft);
+        game.step(&[Command::Resume]).unwrap();
+        assert!(!game.left && !game.right && !game.soft);
     }
-
     #[test]
-    fn detects_full_and_mini_t_spins_from_corner_occupancy() {
-        let piece = ActivePiece {
-            kind: PieceKind::T,
-            rotation: 0,
-            x: 3,
-            y: 5,
-            last_rotation: true,
-            last_kick: (0, 0),
-        };
-        let mut full = Game::new(1);
-        full.active = piece;
-        for (x, y) in [(3, 5), (5, 5), (3, 7)] {
-            full.board.cells[y][x] = Some(PieceKind::I);
-        }
-        assert_eq!(full.t_spin(), Some(Spin::Full));
-
-        let mut mini = Game::new(1);
-        mini.active = piece;
-        for (x, y) in [(3, 5), (3, 7), (5, 7)] {
-            mini.board.cells[y][x] = Some(PieceKind::I);
-        }
-        assert_eq!(mini.t_spin(), Some(Spin::Mini));
+    fn only_resume_can_unpause() {
+        let mut game = Game::new(7);
+        game.step(&[Command::Start, Command::Pause]).unwrap();
+        game.step(&[Command::RotateCw, Command::HardDrop, Command::Pause])
+            .unwrap();
+        assert_eq!(game.phase, Phase::Paused);
+        game.step(&[Command::Resume]).unwrap();
+        assert_eq!(game.phase, Phase::Falling);
+    }
+    #[test]
+    fn hold_is_limited_until_lock() {
+        let mut game = Game::new(7);
+        game.step(&[Command::Start, Command::Hold, Command::Hold])
+            .unwrap();
+        assert!(game.hold_used);
+    }
+    #[test]
+    fn repeated_soft_drop_presses_only_apply_the_initial_drop() {
+        let mut game = Game::new(7);
+        game.step(&[Command::Start]).unwrap();
+        let initial_y = game.active.y;
+        game.step(&[Command::SoftDropPress, Command::SoftDropPress])
+            .unwrap();
+        assert_eq!(game.active.y, initial_y + 1);
     }
 }

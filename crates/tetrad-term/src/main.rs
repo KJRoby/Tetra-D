@@ -3,9 +3,6 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use tetradynamo_core::{
-    shape_cells, Board, Command, Game, Phase, PieceKind, HEIGHT, HIDDEN_ROWS, WIDTH,
-};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -17,6 +14,9 @@ use ratatui::{
 use std::{
     io,
     time::{Duration, Instant},
+};
+use tetradynamo_core::{
+    shape_cells, Board, Command, Game, Phase, PieceKind, HEIGHT, HIDDEN_ROWS, WIDTH,
 };
 
 const RED: Color = Color::Rgb(255, 0, 0);
@@ -33,12 +33,25 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
     let mut game = Game::new(0x5445_5452_4144);
     let mut last = Instant::now();
     let mut acc = Duration::ZERO;
+    let mut pending_commands = Vec::new();
+    let mut level_flash_ticks = 0_u32;
     loop {
         let now = Instant::now();
         acc += now - last;
         last = now;
         while acc >= Duration::from_millis(1) {
-            game.step(None);
+            let batch = std::mem::take(&mut pending_commands);
+            let result = game
+                .step(&batch)
+                .expect("terminal command batch is bounded");
+            if result
+                .events
+                .iter()
+                .any(|event| matches!(event, tetradynamo_core::GameEvent::LevelChanged { .. }))
+            {
+                level_flash_ticks = 180;
+            }
+            level_flash_ticks = level_flash_ticks.saturating_sub(1);
             acc -= Duration::from_millis(1);
         }
         while event::poll(Duration::ZERO)? {
@@ -47,20 +60,25 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                     return Ok(());
                 }
                 if let Some(c) = command(k.code, k.kind) {
-                    game.step(Some(c));
+                    let c = if c == Command::Pause && game.phase == Phase::Paused {
+                        Command::Resume
+                    } else {
+                        c
+                    };
+                    pending_commands.push(c);
                     // Key-release events are not consistently available across
                     // Windows, macOS, and Linux terminals. Treat a press as a
                     // reliable tap; terminals that repeat a held key still give
                     // traditional repeat movement without a latched direction.
                     if k.kind != KeyEventKind::Release {
                         if let Some(release) = release_for(c) {
-                            game.step(Some(release));
+                            pending_commands.push(release);
                         }
                     }
                 }
             }
         }
-        terminal.draw(|f| draw(f.area(), f, &game))?;
+        terminal.draw(|f| draw(f.area(), f, &game, level_flash_ticks > 0))?;
         std::thread::sleep(Duration::from_millis(8));
     }
 }
@@ -92,7 +110,7 @@ fn command(k: KeyCode, kind: KeyEventKind) -> Option<Command> {
         _ => return None,
     })
 }
-fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game) {
+fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash: bool) {
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Black)),
         area,
@@ -118,8 +136,8 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game) {
         g.lines,
         g.level,
         g.score,
-        g.elapsed_ticks / 60_000,
-        (g.elapsed_ticks / 1_000) % 60,
+        g.snapshot().timers.active_gameplay_ticks / 60_000,
+        (g.snapshot().timers.active_gameplay_ticks / 1_000) % 60,
         g.gravity_cps()
     );
     box_text(f, left, "STATUS", stats);
@@ -138,9 +156,9 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game) {
     f.render_widget(
         Paragraph::new(board_art(&g.board, g))
             .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(RED)),
+                Block::default().borders(Borders::ALL).border_style(
+                    Style::default().fg(if level_flash { Color::White } else { RED }),
+                ),
             )
             .style(Style::default().fg(RED)),
         mid,

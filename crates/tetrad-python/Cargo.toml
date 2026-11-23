@@ -1,0 +1,15 @@
+[package]
+name = "tetrad-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tetradynamo"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["abi3-py311", "extension-module"] }
+tetradynamo-core = { path = "../tetradynamo-core" }
