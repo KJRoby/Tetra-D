@@ -1,0 +1,9 @@
+[package]
+name = "dynamo-terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crossterm = "0.28"
+dynamo-core = { path = "../dynamo-core" }
+ratatui = "0.29"

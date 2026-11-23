@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/dynamo-core", "crates/dynamo-terminal"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
