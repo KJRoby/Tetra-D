@@ -49,7 +49,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                 .iter()
                 .any(|event| matches!(event, tetradynamo_core::GameEvent::LevelChanged { .. }))
             {
-                level_flash_ticks = 180;
+                level_flash_ticks = 500;
             }
             level_flash_ticks = level_flash_ticks.saturating_sub(1);
             acc -= Duration::from_millis(1);
@@ -78,7 +78,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                 }
             }
         }
-        terminal.draw(|f| draw(f.area(), f, &game, level_flash_ticks > 0))?;
+        terminal.draw(|f| draw(f.area(), f, &game, level_flash_ticks))?;
         std::thread::sleep(Duration::from_millis(8));
     }
 }
@@ -110,7 +110,7 @@ fn command(k: KeyCode, kind: KeyEventKind) -> Option<Command> {
         _ => return None,
     })
 }
-fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash: bool) {
+fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash_ticks: u32) {
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Black)),
         area,
@@ -131,6 +131,12 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash: bool) {
     let left = cols[0];
     let mid = cols[1];
     let right = cols[2];
+    let board_area = Rect {
+        x: mid.x,
+        y: mid.y,
+        width: mid.width,
+        height: 22.min(mid.height.saturating_sub(1)),
+    };
     let stats = format!(
         "LINES   {}\nLEVEL   {}\nSCORE   {}\nTIME    {:02}:{:02}\nGRAVITY {} cells/s",
         g.lines,
@@ -156,13 +162,42 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash: bool) {
     f.render_widget(
         Paragraph::new(board_art(&g.board, g))
             .block(
-                Block::default().borders(Borders::ALL).border_style(
-                    Style::default().fg(if level_flash { Color::White } else { RED }),
-                ),
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default().fg(if level_flash_visible(level_flash_ticks) {
+                            Color::White
+                        } else {
+                            RED
+                        }),
+                    ),
             )
             .style(Style::default().fg(RED)),
-        mid,
+        board_area,
     );
+    if let Some(chain) = chain_label(g.combo) {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "CHAIN|",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    chain.to_string(),
+                    Style::default().fg(RED).add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            .alignment(Alignment::Center),
+            Rect {
+                x: board_area.x,
+                y: board_area.bottom(),
+                width: board_area.width,
+                height: 1,
+            },
+        );
+    }
     let next = g
         .next()
         .take(5)
@@ -208,6 +243,20 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash: bool) {
         );
     }
 }
+
+fn chain_label(combo: u32) -> Option<u32> {
+    if combo >= 2 {
+        Some(combo - 1)
+    } else {
+        None
+    }
+}
+
+fn level_flash_visible(remaining: u32) -> bool {
+    let elapsed = 500_u32.saturating_sub(remaining);
+    elapsed < 125 || (250..375).contains(&elapsed)
+}
+
 fn title(area: Rect, f: &mut ratatui::Frame) {
     let lines = vec![
         Line::from(vec![
@@ -304,14 +353,15 @@ fn clear_notice_line(notice: tetradynamo_core::ClearNotice) -> Line<'static> {
     let white = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
+    let b2b = if notice.back_to_back { "B2B " } else { "" };
     let prefix = match notice.spin {
-        Some(tetradynamo_core::Spin::Full) => "TSPIN ",
-        Some(tetradynamo_core::Spin::Mini) => "MINI TSPIN ",
-        None => "",
+        Some(tetradynamo_core::Spin::Full) => format!("{b2b}TSPIN "),
+        Some(tetradynamo_core::Spin::Mini) => format!("{b2b}MINI TSPIN "),
+        None => b2b.to_owned(),
     };
     if notice.clear == tetradynamo_core::Clear::TetraD {
         return Line::from(vec![
-            Span::styled(prefix.to_owned() + "TETRA|", white),
+            Span::styled(prefix + "TETRA|", white),
             Span::styled("D", Style::default().fg(RED).add_modifier(Modifier::BOLD)),
             Span::styled(format!("  +{}", notice.points), white),
         ]);
@@ -338,4 +388,21 @@ fn piece_art(p: Option<PieceKind>) -> String {
 }
 fn piece_cells(k: PieceKind, r: u8) -> &'static [(i8, i8); 4] {
     shape_cells(k, r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn gameplay_draws_after_start() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut game = Game::new(7);
+        game.step(&[Command::Start]).unwrap();
+        terminal
+            .draw(|frame| draw(frame.area(), frame, &game, 0))
+            .unwrap();
+    }
 }

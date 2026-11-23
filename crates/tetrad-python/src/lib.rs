@@ -179,11 +179,12 @@ fn snapshot_to_py<'py>(py: Python<'py>, snapshot: &GameSnapshot) -> PyResult<Bou
         clear,
         points,
         spin,
+        back_to_back,
     }) = snapshot.clear_notice
     {
         value.set_item(
             "clear_notice",
-            (clear_name(clear), points, spin.map(spin_name)),
+            (clear_name(clear), points, spin.map(spin_name), back_to_back),
         )?;
     } else {
         value.set_item("clear_notice", py.None())?;
@@ -241,11 +242,17 @@ fn events_to_py<'py>(py: Python<'py>, events: &[GameEvent]) -> Bound<'py, PyList
                 value.set_item("type", "locked").unwrap();
                 value.set_item("kind", piece_name(*kind)).unwrap();
             }
-            GameEvent::LinesCleared { rows, clear, spin } => {
+            GameEvent::LinesCleared {
+                rows,
+                clear,
+                spin,
+                back_to_back,
+            } => {
                 value.set_item("type", "lines_cleared").unwrap();
                 value.set_item("rows", rows).unwrap();
                 value.set_item("clear", clear_name(*clear)).unwrap();
                 value.set_item("spin", spin.map(spin_name)).unwrap();
+                value.set_item("back_to_back", back_to_back).unwrap();
             }
             GameEvent::ScoreAwarded { points, total } => {
                 value.set_item("type", "score_awarded").unwrap();

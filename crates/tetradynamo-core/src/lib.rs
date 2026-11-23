@@ -96,6 +96,8 @@ pub struct ClearNotice {
     pub clear: Clear,
     pub points: u32,
     pub spin: Option<Spin>,
+    /// True when this qualifying clear received the back-to-back score bonus.
+    pub back_to_back: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActivePiece {
@@ -206,6 +208,7 @@ pub enum GameEvent {
         rows: Vec<u8>,
         clear: Clear,
         spin: Option<Spin>,
+        back_to_back: bool,
     },
     ScoreAwarded {
         points: u32,
@@ -646,6 +649,7 @@ impl Game {
             _ => Clear::TetraD,
         };
         self.combo += 1;
+        let back_to_back = self.back_to_back && qualifies_back_to_back(spin, n);
         let points = score(
             n,
             self.level,
@@ -660,9 +664,10 @@ impl Game {
             rows: rows.iter().map(|&r| r as u8).collect(),
             clear,
             spin,
+            back_to_back,
         });
         e.push(GameEvent::Combo { count: self.combo });
-        let b = spin.is_some() || n == 4;
+        let b = qualifies_back_to_back(spin, n);
         if b != self.back_to_back {
             e.push(GameEvent::BackToBack { active: b })
         }
@@ -671,6 +676,7 @@ impl Game {
             clear,
             points,
             spin,
+            back_to_back,
         });
         self.notice_time = NOTICE_DELAY;
         self.pending = rows;
@@ -806,6 +812,9 @@ fn score(n: u32, l: u32, t: bool, m: bool, c: u32, b: bool, p: bool) -> u32 {
         x += [0, 800, 1000, 1800, 2000][n as usize] * l
     }
     x
+}
+fn qualifies_back_to_back(spin: Option<Spin>, lines: u32) -> bool {
+    spin.is_some() || lines == 4
 }
 fn gravity_ms(l: u32) -> u32 {
     [
@@ -975,5 +984,12 @@ mod tests {
         game.step(&[Command::SoftDropPress, Command::SoftDropPress])
             .unwrap();
         assert_eq!(game.active.y, initial_y + 1);
+    }
+    #[test]
+    fn back_to_back_qualifiers_match_tspins_and_tetrad() {
+        assert!(qualifies_back_to_back(Some(Spin::Full), 1));
+        assert!(qualifies_back_to_back(Some(Spin::Mini), 1));
+        assert!(qualifies_back_to_back(None, 4));
+        assert!(!qualifies_back_to_back(None, 3));
     }
 }

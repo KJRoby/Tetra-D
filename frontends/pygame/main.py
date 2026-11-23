@@ -32,6 +32,16 @@ def text(surface, font, value, position, color=RED, center=False):
     surface.blit(image, rect)
 
 
+def fragments(surface, font, values, position, center=False):
+    """Draw colored text fragments as one contiguous label."""
+    images = [(font.render(value, True, color), color) for value, color in values]
+    width = sum(image.get_width() for image, _ in images)
+    x = position[0] - width // 2 if center else position[0]
+    for image, _ in images:
+        surface.blit(image, (x, position[1]))
+        x += image.get_width()
+
+
 def piece_cells(kind: str, rotation=0):
     cells = {
         "I": [(0, 1), (1, 1), (2, 1), (3, 1)],
@@ -67,24 +77,55 @@ def focus_loss_commands():
     return ["left_release", "right_release", "soft_drop_release", "pause"]
 
 
-def draw_game(surface, snapshot, fonts, flash):
+def clearing_cell_is_white(clearing_rows, clear_ticks, board_row, column):
+    return board_row in clearing_rows and clear_ticks < (column + 1) * 25
+
+
+def level_flash_visible(remaining):
+    elapsed = max(0, 500 - remaining)
+    return elapsed < 125 or 250 <= elapsed < 375
+
+
+def chain_number(combo):
+    return combo - 1 if combo >= 2 else None
+
+
+def clear_notice_fragments(notice):
+    clear, points, spin, back_to_back = notice
+    prefix = "B2B " if back_to_back else ""
+    if spin == "mini":
+        prefix += "MINI TSPIN "
+    elif spin:
+        prefix += "TSPIN "
+    if clear == "TETRA|D":
+        return [(prefix + "TETRA|", WHITE), ("D", RED), (f"  +{points}", WHITE)]
+    return [(f"{prefix}{clear}  +{points}", WHITE)]
+
+
+def draw_game(surface, snapshot, fonts, flash_ticks):
     surface.fill(BLACK)
     tiny, normal, title_font = fonts
     board_x, board_y, cell = 480, 76, 27
-    border = WHITE if flash else RED
+    border = WHITE if level_flash_visible(flash_ticks) else RED
     pygame.draw.rect(surface, border, (board_x - 4, board_y - 4, cell * 10 + 8, cell * 20 + 8), 3)
+    clearing_rows = snapshot["clearing_rows"]
+    clear_ticks = snapshot["timers"]["clear_ticks"]
     for y, row in enumerate(snapshot["board"][2:]):
         for x, locked in enumerate(row):
             rect = (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2)
-            if locked:
+            board_row = y + HIDDEN_ROWS
+            if clearing_cell_is_white(clearing_rows, clear_ticks, board_row, x):
+                pygame.draw.rect(surface, WHITE, rect)
+            elif locked and board_row not in clearing_rows:
                 pygame.draw.rect(surface, RED, rect)
             else:
                 pygame.draw.rect(surface, (56, 0, 0), rect, 1)
     active = snapshot["active"]
-    for x, y in visible_piece_cells(active["x"], snapshot["ghost_y"], active["cells"]):
-        pygame.draw.rect(surface, (100, 0, 0), (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2), 1)
-    for x, y in visible_piece_cells(active["x"], active["y"], active["cells"]):
-        pygame.draw.rect(surface, RED, (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2))
+    if snapshot["phase"] == "falling":
+        for x, y in visible_piece_cells(active["x"], snapshot["ghost_y"], active["cells"]):
+            pygame.draw.rect(surface, (100, 0, 0), (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2), 3)
+        for x, y in visible_piece_cells(active["x"], active["y"], active["cells"]):
+            pygame.draw.rect(surface, RED, (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2))
     elapsed = snapshot["timers"]["active_gameplay_ticks"] // TICK_HZ
     stats = [f"LINES   {snapshot['lines']}", f"LEVEL   {snapshot['level']}", f"SCORE   {snapshot['score']}", f"TIME    {elapsed // 60:02}:{elapsed % 60:02}", f"GRAVITY {snapshot['gravity_cps']} cells/s"]
     text(surface, normal, "STATUS", (90, 90))
@@ -96,9 +137,9 @@ def draw_game(surface, snapshot, fonts, flash):
         draw_piece(surface, kind, (880, 115 + index * 88), 16)
     notice = snapshot["clear_notice"]
     if notice:
-        clear, points, spin = notice
-        label = f"{'MINI ' if spin == 'mini' else ''}{'TSPIN ' if spin else ''}{clear}  +{points}"
-        text(surface, normal, label, (90, 270), WHITE)
+        fragments(surface, normal, clear_notice_fragments(notice), (90, 270))
+    if (chain := chain_number(snapshot["combo"])) is not None:
+        fragments(surface, normal, [("CHAIN|", WHITE), (str(chain), RED)], (board_x + cell * 5, 640), center=True)
     text(surface, tiny, "ARROWS/A D  MOVE     UP/X, Z  ROTATE     DOWN/S  SOFT DROP", (760, 585))
     text(surface, tiny, "SPACE  HARD DROP     C/H  HOLD     P  PAUSE     ESC  QUIT", (760, 615))
     phase = snapshot["phase"]
@@ -110,8 +151,7 @@ def draw_game(surface, snapshot, fonts, flash):
 def draw_title(surface, fonts):
     surface.fill(BLACK)
     _, normal, title_font = fonts
-    text(surface, title_font, "TETRA|", (576, 210), WHITE, center=True)
-    text(surface, title_font, "D", (675, 210), RED, center=True)
+    fragments(surface, title_font, [("TETRA|", WHITE), ("D", RED)], (640, 210), center=True)
     text(surface, normal, "GAME MODE:", (640, 480), RED, center=True)
     text(surface, normal, "> MARATHON", (640, 520), RED, center=True)
     text(surface, normal, "PRESS ENTER TO START", (640, 600), RED, center=True)
@@ -140,10 +180,10 @@ def main():
                 pending.extend(focus_loss_commands())
         while accumulator >= 1 / TICK_HZ:
             result = game.step(pending); pending = []; snapshot = result["snapshot"]
-            if any(event["type"] == "level_changed" for event in result["events"]): flash = 180
+            if any(event["type"] == "level_changed" for event in result["events"]): flash = 500
             flash = max(0, flash - 1); accumulator -= 1 / TICK_HZ
         if snapshot["phase"] == "title": draw_title(logical, fonts)
-        else: draw_game(logical, snapshot, fonts, flash > 0)
+        else: draw_game(logical, snapshot, fonts, flash)
         width, height = window.get_size(); scale = min(width / LOGICAL_SIZE[0], height / LOGICAL_SIZE[1])
         scaled = pygame.transform.smoothscale(logical, (int(LOGICAL_SIZE[0] * scale), int(LOGICAL_SIZE[1] * scale)))
         window.fill(BLACK); window.blit(scaled, ((width - scaled.get_width()) // 2, (height - scaled.get_height()) // 2)); pygame.display.flip()
