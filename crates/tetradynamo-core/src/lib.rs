@@ -464,7 +464,12 @@ impl Game {
             }
             Command::LeftRelease => self.left = false,
             Command::RightRelease => self.right = false,
-            Command::SoftDropRelease => self.soft = false,
+            Command::SoftDropRelease => {
+                if self.soft {
+                    self.soft = false;
+                    self.gravity = 0;
+                }
+            }
             _ if self.phase != Phase::Falling => {}
             Command::LeftPress => {
                 self.left = true;
@@ -479,6 +484,10 @@ impl Game {
             Command::SoftDropPress => {
                 if !self.soft {
                     self.soft = true;
+                    // Soft drop has a much shorter gravity interval. Reset the
+                    // normal-gravity progress so it cannot be interpreted as
+                    // many already-overdue soft-drop intervals.
+                    self.gravity = 0;
                     self.down(true, e)
                 }
             }
@@ -984,6 +993,28 @@ mod tests {
         game.step(&[Command::SoftDropPress, Command::SoftDropPress])
             .unwrap();
         assert_eq!(game.active.y, initial_y + 1);
+    }
+    #[test]
+    fn soft_drop_does_not_inherit_normal_gravity_progress() {
+        let mut game = Game::new(7);
+        game.step(&[Command::Start]).unwrap();
+        game.gravity = gravity_ms(game.level) - 1;
+        let initial_y = game.active.y;
+
+        game.step(&[Command::SoftDropPress]).unwrap();
+        assert_eq!(game.active.y, initial_y + 1);
+
+        game.step(&[]).unwrap();
+        assert_eq!(game.active.y, initial_y + 1);
+    }
+    #[test]
+    fn releasing_soft_drop_resets_the_normal_gravity_phase() {
+        let mut game = Game::new(7);
+        game.step(&[Command::Start, Command::SoftDropPress])
+            .unwrap();
+        game.gravity = 49;
+        game.step(&[Command::SoftDropRelease]).unwrap();
+        assert_eq!(game.gravity, 1);
     }
     #[test]
     fn back_to_back_qualifiers_match_tspins_and_tetrad() {
