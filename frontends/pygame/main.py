@@ -11,6 +11,11 @@ from tetradynamo import Game, TICK_HZ
 LOGICAL_SIZE = (1280, 720)
 BLACK, RED, WHITE = (0, 0, 0), (255, 0, 0), (255, 255, 255)
 HIDDEN_ROWS, BOARD_ROWS = 2, 22
+STATUS_PANEL = (60, 60, 300, 210)
+NOTICE_PANEL = (60, 280, 350, 50)
+HOLD_PANEL = (90, 350, 220, 175)
+NEXT_PANEL = (850, 60, 120, 500)
+CONTROLS_PANEL = (995, 60, 270, 220)
 KEY_DOWN = {
     pygame.K_LEFT: "left_press", pygame.K_a: "left_press",
     pygame.K_RIGHT: "right_press", pygame.K_d: "right_press",
@@ -40,6 +45,10 @@ def fragments(surface, font, values, position, center=False):
     for image, _ in images:
         surface.blit(image, (x, position[1]))
         x += image.get_width()
+
+
+def panel(surface, rect):
+    pygame.draw.rect(surface, RED, rect, 2)
 
 
 def piece_cells(kind: str, rotation=0):
@@ -104,7 +113,7 @@ def clear_notice_fragments(notice):
 
 def draw_game(surface, snapshot, fonts, flash_ticks):
     surface.fill(BLACK)
-    tiny, normal, title_font = fonts
+    tiny, normal, _title_font = fonts
     board_x, board_y, cell = 480, 76, 27
     border = WHITE if level_flash_visible(flash_ticks) else RED
     pygame.draw.rect(surface, border, (board_x - 4, board_y - 4, cell * 10 + 8, cell * 20 + 8), 3)
@@ -126,22 +135,36 @@ def draw_game(surface, snapshot, fonts, flash_ticks):
             pygame.draw.rect(surface, (100, 0, 0), (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2), 3)
         for x, y in visible_piece_cells(active["x"], active["y"], active["cells"]):
             pygame.draw.rect(surface, RED, (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2))
+    for rect in (STATUS_PANEL, HOLD_PANEL, NEXT_PANEL, CONTROLS_PANEL):
+        panel(surface, rect)
     elapsed = snapshot["timers"]["active_gameplay_ticks"] // TICK_HZ
     stats = [f"LINES   {snapshot['lines']}", f"LEVEL   {snapshot['level']}", f"SCORE   {snapshot['score']}", f"TIME    {elapsed // 60:02}:{elapsed % 60:02}", f"GRAVITY {snapshot['gravity_cps']} cells/s"]
-    text(surface, normal, "STATUS", (90, 90))
+    text(surface, normal, "STATUS", (90, 82))
     for index, value in enumerate(stats):
-        text(surface, tiny, value, (90, 125 + index * 31))
-    text(surface, normal, "HOLD", (120, 330)); draw_piece(surface, snapshot["hold"], (120, 365), 18)
+        text(surface, tiny, value, (90, 115 + index * 29))
+    text(surface, normal, "HOLD", (120, 365))
+    draw_piece(surface, snapshot["hold"], (120, 400), 18)
     text(surface, normal, "NEXT", (880, 82))
     for index, kind in enumerate(snapshot["next"][:5]):
         draw_piece(surface, kind, (880, 115 + index * 88), 16)
     notice = snapshot["clear_notice"]
     if notice:
-        fragments(surface, normal, clear_notice_fragments(notice), (90, 270))
+        panel(surface, NOTICE_PANEL)
+        fragments(surface, normal, clear_notice_fragments(notice), (75, 290))
     if (chain := chain_number(snapshot["combo"])) is not None:
         fragments(surface, normal, [("CHAIN|", WHITE), (str(chain), RED)], (board_x + cell * 5, 640), center=True)
-    text(surface, tiny, "ARROWS/A D  MOVE     UP/X, Z  ROTATE     DOWN/S  SOFT DROP", (760, 585))
-    text(surface, tiny, "SPACE  HARD DROP     C/H  HOLD     P  PAUSE     ESC  QUIT", (760, 615))
+    controls = [
+        "ARROWS/A D  MOVE",
+        "UP/X, Z     ROTATE",
+        "DOWN/S      SOFT DROP",
+        "SPACE       HARD DROP",
+        "C/H         HOLD",
+        "P           PAUSE",
+        "ESC         QUIT",
+    ]
+    text(surface, normal, "CONTROLS", (1010, 75))
+    for index, control in enumerate(controls):
+        text(surface, tiny, control, (1010, 112 + index * 23))
     phase = snapshot["phase"]
     if phase in ("paused", "gameover", "complete"):
         message = {"paused": "PAUSED", "gameover": "GAME OVER — R TO RESTART", "complete": "MARATHON COMPLETE — R TO RESTART"}[phase]
