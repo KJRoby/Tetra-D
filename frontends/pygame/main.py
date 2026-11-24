@@ -10,12 +10,19 @@ import pygame
 from tetradynamo import Game, TICK_HZ
 
 LOGICAL_SIZE = (1280, 720)
+LOGICAL_WIDTH, LOGICAL_HEIGHT = LOGICAL_SIZE
 BLACK, RED, WHITE = (0, 0, 0), (255, 0, 0), (255, 255, 255)
 HIDDEN_ROWS, BOARD_ROWS = 2, 22
-STATUS_PANEL = (60, 60, 300, 210)
-NOTICE_PANEL = (60, 280, 350, 50)
-HOLD_PANEL = (90, 350, 220, 175)
-NEXT_PANEL = (850, 60, 120, 500)
+# Keep all gameplay UI relative to the centered well rather than a magic
+# screen coordinate. This also keeps overlays centered over the playable area.
+CELL_SIZE = 27
+BOARD_WIDTH = CELL_SIZE * 10
+BOARD_X, BOARD_Y = (LOGICAL_WIDTH - BOARD_WIDTH) // 2, 76
+WELL_CENTER_X = BOARD_X + BOARD_WIDTH // 2
+STATUS_PANEL = (BOARD_X - 420, 60, 300, 210)
+NOTICE_PANEL = (BOARD_X - 420, 280, 350, 50)
+HOLD_PANEL = (BOARD_X - 390, 350, 220, 175)
+NEXT_PANEL = (BOARD_X + BOARD_WIDTH + 100, 60, 120, 500)
 CONTROLS_PANEL = (995, 60, 270, 220)
 KEY_DOWN = {
     pygame.K_LEFT: "left_press", pygame.K_a: "left_press",
@@ -119,7 +126,7 @@ def logical_mouse(position, window_size):
 
 def pause_option_at(position):
     x, y = position
-    if 520 <= x <= 760 and 390 <= y < 480:
+    if WELL_CENTER_X - 120 <= x <= WELL_CENTER_X + 120 and 390 <= y < 480:
         return int((y - 390) // 30)
     return None
 
@@ -152,7 +159,7 @@ def clear_notice_fragments(notice):
 def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed):
     surface.fill(BLACK)
     tiny, normal, title_font = fonts
-    board_x, board_y, cell = 480, 76, 27
+    board_x, board_y, cell = BOARD_X, BOARD_Y, CELL_SIZE
     border = WHITE if level_flash_visible(flash_ticks) else RED
     pygame.draw.rect(surface, border, (board_x - 4, board_y - 4, cell * 10 + 8, cell * 20 + 8), 3)
     clearing_rows = snapshot["clearing_rows"]
@@ -179,18 +186,18 @@ def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed):
         panel(surface, rect)
     elapsed = snapshot["timers"]["active_gameplay_ticks"] // TICK_HZ
     stats = [f"LINES   {snapshot['lines']}", f"LEVEL   {snapshot['level']}", f"SCORE   {snapshot['score']}", f"TIME    {elapsed // 60:02}:{elapsed % 60:02}", f"GRAVITY {snapshot['gravity_cps']} cells/s"]
-    text(surface, normal, "STATUS", (90, 82))
+    text(surface, normal, "STATUS", (STATUS_PANEL[0] + 30, 82))
     for index, value in enumerate(stats):
-        text(surface, tiny, value, (90, 115 + index * 29))
-    text(surface, normal, "HOLD", (120, 365))
-    draw_piece(surface, snapshot["hold"], (120, 400), 18)
-    text(surface, normal, "NEXT", (880, 82))
+        text(surface, tiny, value, (STATUS_PANEL[0] + 30, 115 + index * 29))
+    text(surface, normal, "HOLD", (HOLD_PANEL[0] + 30, 365))
+    draw_piece(surface, snapshot["hold"], (HOLD_PANEL[0] + 30, 400), 18)
+    text(surface, normal, "NEXT", (NEXT_PANEL[0] + 30, 82))
     for index, kind in enumerate(snapshot["next"][:5]):
-        draw_piece(surface, kind, (880, 115 + index * 88), 16)
+        draw_piece(surface, kind, (NEXT_PANEL[0] + 30, 115 + index * 88), 16)
     notice = snapshot["clear_notice"]
     if notice:
         panel(surface, NOTICE_PANEL)
-        fragments(surface, normal, clear_notice_fragments(notice), (75, 290))
+        fragments(surface, normal, clear_notice_fragments(notice), (NOTICE_PANEL[0] + 15, 290))
     if (chain := chain_number(snapshot["combo"])) is not None:
         fragments(surface, normal, [("CHAIN|", WHITE), (str(chain), RED)], (board_x + cell * 5, 640), center=True)
     controls = [
@@ -209,15 +216,15 @@ def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed):
         text(surface, tiny, f"SEED {snapshot['seed']}", (24, 680), (0, 0, 255))
     phase = snapshot["phase"]
     if (countdown := countdown_label(snapshot)):
-        text(surface, title_font if countdown == "GET READY" else normal, countdown, (640, 350), WHITE, center=True)
+        text(surface, title_font if countdown == "GET READY" else normal, countdown, (WELL_CENTER_X, 350), WHITE, center=True)
     if phase == "paused":
-        text(surface, normal, "PAUSED", (640, 300), WHITE, center=True)
+        text(surface, normal, "PAUSED", (WELL_CENTER_X, 300), WHITE, center=True)
         for index, option in enumerate(PAUSE_OPTIONS):
             color = WHITE if index == pause_index else RED
-            text(surface, normal, option, (640, 390 + index * 30), color, center=True)
+            text(surface, normal, option, (WELL_CENTER_X, 390 + index * 30), color, center=True)
     if phase in ("gameover", "complete"):
         message = {"paused": "PAUSED", "gameover": "GAME OVER — R TO RESTART", "complete": "MARATHON COMPLETE — R TO RESTART"}[phase]
-        text(surface, normal, message, (640, 370), WHITE, center=True)
+        text(surface, normal, message, (WELL_CENTER_X, 370), WHITE, center=True)
 
 
 def draw_title(surface, fonts, seed_prompt, seed_text, seed_error):

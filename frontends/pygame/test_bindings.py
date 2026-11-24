@@ -1,5 +1,9 @@
 import tetradynamo
 from main import (
+    BOARD_WIDTH,
+    BOARD_X,
+    LOGICAL_WIDTH,
+    WELL_CENTER_X,
     chain_number,
     countdown_label,
     clear_notice_fragments,
@@ -8,6 +12,11 @@ from main import (
     level_flash_visible,
     visible_piece_cells,
 )
+
+
+def test_well_layout_is_horizontally_centered():
+    assert BOARD_X == (LOGICAL_WIDTH - BOARD_WIDTH) // 2
+    assert WELL_CENTER_X == LOGICAL_WIDTH // 2
 
 
 def test_zero_seed_and_batched_commands_are_deterministic():

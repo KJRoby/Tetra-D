@@ -10,6 +10,15 @@ use tetradynamo_core::{
 
 const LOGICAL_WIDTH: f32 = 1280.0;
 const LOGICAL_HEIGHT: f32 = 720.0;
+const CELL_SIZE: f32 = 27.0;
+const BOARD_WIDTH: f32 = CELL_SIZE * 10.0;
+const BOARD_X: f32 = (LOGICAL_WIDTH - BOARD_WIDTH) / 2.0;
+const BOARD_Y: f32 = 76.0;
+const WELL_CENTER_X: f32 = BOARD_X + BOARD_WIDTH / 2.0;
+const STATUS_X: f32 = BOARD_X - 420.0;
+const NOTICE_X: f32 = BOARD_X - 420.0;
+const HOLD_X: f32 = BOARD_X - 390.0;
+const NEXT_X: f32 = BOARD_X + BOARD_WIDTH + 100.0;
 const BLACK: Color = Color::new(0.0, 0.0, 0.0, 1.0);
 const RED: Color = Color::new(1.0, 0.0, 0.0, 1.0);
 const WHITE: Color = Color::new(1.0, 1.0, 1.0, 1.0);
@@ -191,7 +200,9 @@ async fn main() {
         if snapshot.phase == Phase::Paused {
             let view = View::current();
             let (x, y) = view.logical(mouse_position().0, mouse_position().1);
-            if (520.0..=760.0).contains(&x) && (390.0..480.0).contains(&y) {
+            if ((WELL_CENTER_X - 120.0)..=(WELL_CENTER_X + 120.0)).contains(&x)
+                && (390.0..480.0).contains(&y)
+            {
                 pause_index = ((y - 390.0) / 30.0) as u8;
                 if is_mouse_button_pressed(MouseButton::Left) {
                     match pause_index {
@@ -337,7 +348,7 @@ fn draw_game(
     pause_index: u8,
     show_seed: bool,
 ) {
-    let (board_x, board_y, cell) = (480.0, 76.0, 27.0);
+    let (board_x, board_y, cell) = (BOARD_X, BOARD_Y, CELL_SIZE);
     let border = if level_flash_visible(flash_ticks) {
         WHITE
     } else {
@@ -404,16 +415,16 @@ fn draw_game(
     }
 
     for panel in [
-        (60.0, 60.0, 300.0, 210.0),
-        (90.0, 350.0, 220.0, 175.0),
-        (850.0, 60.0, 120.0, 500.0),
+        (STATUS_X, 60.0, 300.0, 210.0),
+        (HOLD_X, 350.0, 220.0, 175.0),
+        (NEXT_X, 60.0, 120.0, 500.0),
         (995.0, 60.0, 270.0, 220.0),
     ] {
         outline(view, panel.0, panel.1, panel.2, panel.3, 2.0, RED);
     }
 
     let elapsed = snapshot.timers.active_gameplay_ticks / TICK_HZ as u64;
-    text(view, "STATUS", 90.0, 82.0, 28.0, RED);
+    text(view, "STATUS", STATUS_X + 30.0, 82.0, 28.0, RED);
     for (index, value) in [
         format!("LINES   {}", snapshot.lines),
         format!("LEVEL   {}", snapshot.level),
@@ -424,24 +435,37 @@ fn draw_game(
     .iter()
     .enumerate()
     {
-        text(view, value, 90.0, 115.0 + index as f32 * 29.0, 20.0, RED);
+        text(
+            view,
+            value,
+            STATUS_X + 30.0,
+            115.0 + index as f32 * 29.0,
+            20.0,
+            RED,
+        );
     }
-    text(view, "HOLD", 120.0, 365.0, 28.0, RED);
-    draw_piece(view, snapshot.hold, 120.0, 400.0, 18.0);
-    text(view, "NEXT", 880.0, 82.0, 28.0, RED);
+    text(view, "HOLD", HOLD_X + 30.0, 365.0, 28.0, RED);
+    draw_piece(view, snapshot.hold, HOLD_X + 30.0, 400.0, 18.0);
+    text(view, "NEXT", NEXT_X + 30.0, 82.0, 28.0, RED);
     for (index, kind) in snapshot.next.iter().take(5).enumerate() {
-        draw_piece(view, Some(*kind), 880.0, 115.0 + index as f32 * 88.0, 16.0);
+        draw_piece(
+            view,
+            Some(*kind),
+            NEXT_X + 30.0,
+            115.0 + index as f32 * 88.0,
+            16.0,
+        );
     }
 
     if let Some(notice) = snapshot.clear_notice {
-        outline(view, 60.0, 280.0, 350.0, 50.0, 2.0, RED);
-        draw_clear_notice(view, notice, 75.0, 290.0);
+        outline(view, NOTICE_X, 280.0, 350.0, 50.0, 2.0, RED);
+        draw_clear_notice(view, notice, NOTICE_X + 15.0, 290.0);
     }
     if let Some(chain) = chain_number(snapshot.combo) {
         fragments(
             view,
             &[("CHAIN|", WHITE), (&chain.to_string(), RED)],
-            615.0,
+            WELL_CENTER_X,
             640.0,
             28.0,
             true,
@@ -475,22 +499,22 @@ fn draw_game(
     }
 
     match snapshot.phase {
-        Phase::Ready => centered_text(view, "GET READY", 640.0, 350.0, 54.0, WHITE),
+        Phase::Ready => centered_text(view, "GET READY", WELL_CENTER_X, 350.0, 54.0, WHITE),
         Phase::StartCountdown | Phase::ResumeCountdown => centered_text(
             view,
             &countdown_label(snapshot).to_string(),
-            640.0,
+            WELL_CENTER_X,
             350.0,
             28.0,
             WHITE,
         ),
         Phase::Paused => {
-            centered_text(view, "PAUSED", 640.0, 300.0, 28.0, WHITE);
+            centered_text(view, "PAUSED", WELL_CENTER_X, 300.0, 28.0, WHITE);
             for (index, option) in ["RESUME", "RESTART", "RETURN TO TITLE"].iter().enumerate() {
                 centered_text(
                     view,
                     option,
-                    640.0,
+                    WELL_CENTER_X,
                     390.0 + index as f32 * 30.0,
                     28.0,
                     if pause_index == index as u8 {
@@ -501,13 +525,18 @@ fn draw_game(
                 );
             }
         }
-        Phase::GameOver => {
-            centered_text(view, "GAME OVER — R TO RESTART", 640.0, 350.0, 28.0, WHITE)
-        }
+        Phase::GameOver => centered_text(
+            view,
+            "GAME OVER — R TO RESTART",
+            WELL_CENTER_X,
+            350.0,
+            28.0,
+            WHITE,
+        ),
         Phase::Complete => centered_text(
             view,
             "MARATHON COMPLETE — R TO RESTART",
-            640.0,
+            WELL_CENTER_X,
             350.0,
             28.0,
             WHITE,
@@ -785,5 +814,11 @@ mod tests {
         assert_eq!(parse_seed("42"), Some(42));
         assert_eq!(parse_seed("0x2A"), Some(42));
         assert_eq!(parse_seed("18446744073709551616"), None);
+    }
+
+    #[test]
+    fn well_layout_is_horizontally_centered() {
+        assert_eq!(BOARD_X, (LOGICAL_WIDTH - BOARD_WIDTH) / 2.0);
+        assert_eq!(WELL_CENTER_X, LOGICAL_WIDTH / 2.0);
     }
 }
