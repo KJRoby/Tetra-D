@@ -38,6 +38,8 @@ KEY_UP = {
     pygame.K_DOWN: "soft_drop_release", pygame.K_s: "soft_drop_release",
 }
 PAUSE_OPTIONS = ("RESUME", "RESTART", "RETURN TO TITLE")
+TITLE_OPTIONS = ("SOLO", "REPLAY", "CONFIG")
+SOLO_OPTIONS = ("MARATHON",)
 KONAMI = (pygame.K_UP, pygame.K_UP, pygame.K_DOWN, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_b, pygame.K_a)
 
 
@@ -128,6 +130,14 @@ def pause_option_at(position):
     x, y = position
     if WELL_CENTER_X - 120 <= x <= WELL_CENTER_X + 120 and 390 <= y < 480:
         return int((y - 390) // 30)
+    return None
+
+
+def title_option_at(position, screen):
+    x, y = position
+    options = TITLE_OPTIONS if screen == "root" else SOLO_OPTIONS if screen == "solo" else ()
+    if 500 <= x <= 780 and 480 <= y < 480 + len(options) * 40:
+        return int((y - 480) // 40)
     return None
 
 
@@ -227,13 +237,19 @@ def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed):
         text(surface, normal, message, (WELL_CENTER_X, 370), WHITE, center=True)
 
 
-def draw_title(surface, fonts, seed_prompt, seed_text, seed_error):
+def draw_title(surface, fonts, seed_prompt, seed_text, seed_error, title_screen, title_index):
     surface.fill(BLACK)
     _, normal, title_font = fonts
     fragments(surface, title_font, [("TETRA|", WHITE), ("D", RED)], (640, 210), center=True)
-    text(surface, normal, "GAME MODE:", (640, 480), RED, center=True)
-    text(surface, normal, "> MARATHON", (640, 520), RED, center=True)
-    text(surface, normal, "PRESS ENTER TO START", (640, 600), RED, center=True)
+    if title_screen in ("root", "solo"):
+        options = TITLE_OPTIONS if title_screen == "root" else SOLO_OPTIONS
+        if title_screen == "solo": text(surface, normal, "SOLO", (640, 440), RED, center=True)
+        for index, option in enumerate(options):
+            text(surface, normal, f"> {option}" if index == title_index else option, (640, 480 + index * 40), WHITE if index == title_index else RED, center=True)
+        text(surface, tiny, "UP/DOWN + ENTER/SPACE", (640, 640), RED, center=True)
+    else:
+        text(surface, normal, f"{title_screen.upper()} — COMING SOON", (640, 500), WHITE, center=True)
+        text(surface, tiny, "ESC TO RETURN", (640, 550), RED, center=True)
     if seed_prompt:
         text(surface, normal, "ENTER SEED (DECIMAL OR 0xHEX)", (640, 300), WHITE, center=True)
         text(surface, normal, seed_text or "_", (640, 340), WHITE, center=True)
@@ -250,6 +266,7 @@ def main():
     game = Game(0x544554524144)
     snapshot, pending = game.snapshot(), []
     pause_index, seed_locked, show_seed = 0, False, False
+    title_screen, title_index = "root", 0
     seed_prompt, seed_text, seed_error, konami = False, "", False, []
     accumulator, previous, running, flash = 0.0, perf_counter(), True, 0
 
@@ -292,7 +309,7 @@ def main():
                     konami = (konami + [event.key])[-len(KONAMI):]
                     if tuple(konami) == KONAMI:
                         konami = []
-                        if snapshot["phase"] == "title":
+                        if snapshot["phase"] == "title" and title_screen == "root":
                             seed_prompt, seed_text, seed_error = True, "", False
                         else:
                             seed_locked = not seed_locked
@@ -303,8 +320,20 @@ def main():
                         pending.append("resume")
                     elif snapshot["phase"] in ("falling", "clearing"):
                         pending.append("pause")
-                elif snapshot["phase"] == "title" and event.key == pygame.K_RETURN:
-                    apply(game.start_with_seed(snapshot["seed"] if seed_locked else random_seed()))
+                elif snapshot["phase"] == "title":
+                    options = TITLE_OPTIONS if title_screen == "root" else SOLO_OPTIONS if title_screen == "solo" else ()
+                    if event.key == pygame.K_ESCAPE and title_screen != "root":
+                        title_screen, title_index = "root", 0
+                    elif event.key == pygame.K_UP and options:
+                        title_index = (title_index - 1) % len(options)
+                    elif event.key == pygame.K_DOWN and options:
+                        title_index = (title_index + 1) % len(options)
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if title_screen == "root":
+                            selected = TITLE_OPTIONS[title_index]
+                            title_screen, title_index = ("solo", 0) if selected == "SOLO" else (selected.lower(), 0)
+                        elif title_screen == "solo":
+                            apply(game.start_with_seed(snapshot["seed"] if seed_locked else random_seed()))
                 elif snapshot["phase"] == "paused":
                     if event.key == pygame.K_UP:
                         pause_index = (pause_index - 1) % len(PAUSE_OPTIONS)
@@ -326,11 +355,21 @@ def main():
                 if option is not None:
                     pause_index = option
                     select_pause_option()
+            elif event.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN) and snapshot["phase"] == "title" and not seed_prompt:
+                option = title_option_at(logical_mouse(event.pos, window.get_size()), title_screen)
+                if option is not None:
+                    title_index = option
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        if title_screen == "root":
+                            selected = TITLE_OPTIONS[title_index]
+                            title_screen, title_index = ("solo", 0) if selected == "SOLO" else (selected.lower(), 0)
+                        elif title_screen == "solo":
+                            apply(game.start_with_seed(snapshot["seed"] if seed_locked else random_seed()))
         while accumulator >= 1 / TICK_HZ:
             result = game.step(pending); pending = []; snapshot = result["snapshot"]
             if any(event["type"] == "level_changed" for event in result["events"]): flash = 500
             flash = max(0, flash - 1); accumulator -= 1 / TICK_HZ
-        if snapshot["phase"] == "title": draw_title(logical, fonts, seed_prompt, seed_text, seed_error)
+        if snapshot["phase"] == "title": draw_title(logical, fonts, seed_prompt, seed_text, seed_error, title_screen, title_index)
         else: draw_game(logical, snapshot, fonts, flash, pause_index, show_seed)
         width, height = window.get_size(); scale = min(width / LOGICAL_SIZE[0], height / LOGICAL_SIZE[1])
         scaled = pygame.transform.smoothscale(logical, (int(LOGICAL_SIZE[0] * scale), int(LOGICAL_SIZE[1] * scale)))

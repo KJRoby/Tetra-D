@@ -87,6 +87,14 @@ struct SaveOverlay<'a> {
     message: Option<&'a str>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TitleScreen {
+    Root,
+    Solo,
+    Replay,
+    Config,
+}
+
 impl HeldInput {
     fn reconcile(&mut self, pending: &mut Vec<Command>) {
         reconcile_key(
@@ -153,6 +161,8 @@ async fn main() {
     let mut save_prompt = false;
     let mut save_name = String::new();
     let mut save_message: Option<(String, f64)> = None;
+    let mut title_screen = TitleScreen::Root;
+    let mut title_index = 0_u8;
 
     loop {
         if save_prompt {
@@ -212,14 +222,43 @@ async fn main() {
         }
         if !save_prompt && seed_control.prompt {
             seed_prompt_input(&mut game, &mut snapshot, &mut seed_control);
-        } else if !save_prompt && snapshot.phase == Phase::Title && is_key_pressed(KeyCode::Enter) {
-            let seed = if seed_control.locked {
-                snapshot.seed
+        } else if !save_prompt && snapshot.phase == Phase::Title {
+            let count = if title_screen == TitleScreen::Root {
+                3
+            } else if title_screen == TitleScreen::Solo {
+                1
             } else {
-                random_seed()
+                0
             };
-            game = new_recording(seed);
-            snapshot = game.start_with_seed(seed).snapshot;
+            if is_key_pressed(KeyCode::Escape) && title_screen != TitleScreen::Root {
+                title_screen = TitleScreen::Root;
+                title_index = 0;
+            } else if count > 0 && is_key_pressed(KeyCode::Up) {
+                title_index = (title_index + count - 1) % count;
+            } else if count > 0 && is_key_pressed(KeyCode::Down) {
+                title_index = (title_index + 1) % count;
+            } else if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::Space) {
+                match title_screen {
+                    TitleScreen::Root => {
+                        title_screen = match title_index {
+                            0 => TitleScreen::Solo,
+                            1 => TitleScreen::Replay,
+                            _ => TitleScreen::Config,
+                        };
+                        title_index = 0;
+                    }
+                    TitleScreen::Solo => {
+                        let seed = if seed_control.locked {
+                            snapshot.seed
+                        } else {
+                            random_seed()
+                        };
+                        game = new_recording(seed);
+                        snapshot = game.start_with_seed(seed).snapshot;
+                    }
+                    _ => {}
+                }
+            }
         } else if !save_prompt && matches!(snapshot.phase, Phase::Falling | Phase::Clearing) {
             held.reconcile(&mut pending);
         } else {
@@ -268,6 +307,42 @@ async fn main() {
                 }
             }
         }
+        if snapshot.phase == Phase::Title && !seed_control.prompt {
+            let view = View::current();
+            let (x, y) = view.logical(mouse_position().0, mouse_position().1);
+            let count = if title_screen == TitleScreen::Root {
+                3
+            } else if title_screen == TitleScreen::Solo {
+                1
+            } else {
+                0
+            };
+            if (500.0..=780.0).contains(&x) && (480.0..(480.0 + count as f32 * 40.0)).contains(&y) {
+                title_index = ((y - 480.0) / 40.0) as u8;
+                if is_mouse_button_pressed(MouseButton::Left) {
+                    match title_screen {
+                        TitleScreen::Root => {
+                            title_screen = match title_index {
+                                0 => TitleScreen::Solo,
+                                1 => TitleScreen::Replay,
+                                _ => TitleScreen::Config,
+                            };
+                            title_index = 0;
+                        }
+                        TitleScreen::Solo => {
+                            let seed = if seed_control.locked {
+                                snapshot.seed
+                            } else {
+                                random_seed()
+                            };
+                            game = new_recording(seed);
+                            snapshot = game.start_with_seed(seed).snapshot;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         accumulator += get_frame_time().min(0.25);
         if snapshot.phase == Phase::Paused && !pending.contains(&Command::Resume) {
@@ -297,7 +372,7 @@ async fn main() {
         let view = View::current();
         clear_background(BLACK);
         if snapshot.phase == Phase::Title {
-            draw_title(view, &seed_control);
+            draw_title(view, &seed_control, title_screen, title_index);
         } else {
             draw_game(
                 view,
@@ -702,7 +777,7 @@ fn draw_piece(view: View, kind: Option<PieceKind>, origin_x: f32, origin_y: f32,
     }
 }
 
-fn draw_title(view: View, seed_control: &SeedControl) {
+fn draw_title(view: View, seed_control: &SeedControl, screen: TitleScreen, index: u8) {
     fragments(
         view,
         &[("TETRA|", WHITE), ("D", RED)],
@@ -711,9 +786,32 @@ fn draw_title(view: View, seed_control: &SeedControl) {
         54.0,
         true,
     );
-    centered_text(view, "GAME MODE:", 640.0, 480.0, 28.0, RED);
-    centered_text(view, "> MARATHON", 640.0, 520.0, 28.0, RED);
-    centered_text(view, "PRESS ENTER TO START", 640.0, 600.0, 28.0, RED);
+    match screen {
+        TitleScreen::Root => {
+            for (i, value) in ["SOLO", "REPLAY", "CONFIG"].iter().enumerate() {
+                centered_text(
+                    view,
+                    &format!("{}{}", if index == i as u8 { "> " } else { "" }, value),
+                    640.0,
+                    480.0 + i as f32 * 40.0,
+                    28.0,
+                    if index == i as u8 { WHITE } else { RED },
+                );
+            }
+        }
+        TitleScreen::Solo => {
+            centered_text(view, "SOLO", 640.0, 440.0, 28.0, RED);
+            centered_text(view, "> MARATHON", 640.0, 480.0, 28.0, WHITE);
+        }
+        TitleScreen::Replay => {
+            centered_text(view, "REPLAY — COMING SOON", 640.0, 500.0, 28.0, WHITE);
+            centered_text(view, "ESC TO RETURN", 640.0, 550.0, 20.0, RED);
+        }
+        TitleScreen::Config => {
+            centered_text(view, "CONFIG — COMING SOON", 640.0, 500.0, 28.0, WHITE);
+            centered_text(view, "ESC TO RETURN", 640.0, 550.0, 20.0, RED);
+        }
+    }
     if seed_control.prompt {
         centered_text(
             view,
