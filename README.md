@@ -1,7 +1,13 @@
 # Tetra|D
 
-Tetra|D is a deterministic falling-block game with a Rust simulation core and a
-Ratatui/Crossterm terminal frontend.
+Tetra|D is an early-alpha deterministic falling-block game with a reusable Rust
+simulation core, Ratatui/Crossterm terminal frontend, and Pygame frontend.
+
+The core defaults to the Guideline mechanical ruleset and Marathon game mode.
+See the [architecture](docs/ARCHITECTURE.md), [core API](docs/CORE_API.md),
+[rulesets](docs/RULESETS.md), [game modes](docs/GAME_MODES.md),
+[determinism](docs/DETERMINISM.md), [frontend guide](docs/FRONTEND_GUIDE.md),
+and [roadmap](docs/ROADMAP.md) for implementation details and limitations.
 
 ## Run
 
