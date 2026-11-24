@@ -170,9 +170,7 @@ async fn main() {
                 save_prompt = false;
             } else {
                 while let Some(character) = get_char_pressed() {
-                    if (character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-                        && save_name.len() < 48
-                    {
+                    if save_name_character_allowed(character) && save_name.len() < 48 {
                         save_name.push(character);
                     }
                 }
@@ -182,6 +180,7 @@ async fn main() {
         {
             save_prompt = true;
             save_name.clear();
+            drain_text_input();
         }
         if !save_prompt
             && matches!(snapshot.phase, Phase::Title | Phase::Paused)
@@ -238,6 +237,12 @@ async fn main() {
             };
             game = new_recording(seed);
             snapshot = game.start_with_seed(seed).snapshot;
+        }
+        if pending.contains(&Command::ReturnToTitle) {
+            // The paused replay timeline is frozen, so title navigation must
+            // be applied immediately rather than waiting for another tick.
+            pending.clear();
+            snapshot = game.return_to_title().snapshot;
         }
         if snapshot.phase == Phase::Paused {
             let view = View::current();
@@ -807,6 +812,14 @@ fn random_seed() -> u64 {
     nanos ^ nanos.rotate_left(17) ^ 0xA076_1D64_78BD_642F
 }
 
+fn drain_text_input() {
+    while get_char_pressed().is_some() {}
+}
+
+fn save_name_character_allowed(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+}
+
 fn new_recording(seed: u64) -> ReplayRecorder {
     ReplayRecorder::new(seed, GameConfig::default()).expect("default replay configuration is valid")
 }
@@ -934,6 +947,15 @@ mod tests {
         assert_eq!(parse_seed("42"), Some(42));
         assert_eq!(parse_seed("0x2A"), Some(42));
         assert_eq!(parse_seed("18446744073709551616"), None);
+    }
+
+    #[test]
+    fn save_names_use_portable_characters() {
+        assert!(save_name_character_allowed('A'));
+        assert!(save_name_character_allowed('_'));
+        assert!(save_name_character_allowed('-'));
+        assert!(!save_name_character_allowed('/'));
+        assert!(!save_name_character_allowed(' '));
     }
 
     #[test]
