@@ -6,7 +6,12 @@
 - Guideline mechanics, seven-bag, SRS, hold, T-spins, scoring, combo/B2B, and
   Marathon.
 - Ratatui terminal and PyO3/Pygame frontends sharing the same simulation.
+- Native Macroquad desktop frontend sharing the same simulation directly.
 - Configured Guideline/Marathon defaults and expanded deterministic state hash.
+- Shared ready/start/resume countdown phases and pause-menu lifecycle across
+  all maintained frontends.
+- Optional frontend seed selection and locked-seed restarts for deterministic
+  reproduction.
 
 ## Current limitations
 

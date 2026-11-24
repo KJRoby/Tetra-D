@@ -1,0 +1,11 @@
+[package]
+name = "tetrad-macroquad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Macroquad frontend for Tetra|D."
+repository.workspace = true
+
+[dependencies]
+macroquad = "0.4.16"
+tetradynamo-core = { path = "../tetradynamo-core" }

@@ -17,6 +17,9 @@ pub enum GravityCurve {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimingConfig {
+    pub ready_ticks: u32,
+    pub countdown_ticks: u32,
+    pub resume_countdown_ticks: u32,
     pub lock_delay_ticks: u32,
     pub clear_delay_ticks: u32,
     pub clear_notice_ticks: u32,
@@ -67,6 +70,9 @@ impl RulesetConfig {
             randomizer: RandomizerConfig::SevenBag,
             gravity: GravityCurve::Guideline,
             timing: TimingConfig {
+                ready_ticks: 1_500,
+                countdown_ticks: 3_000,
+                resume_countdown_ticks: 3_000,
                 lock_delay_ticks: 500,
                 clear_delay_ticks: 500,
                 clear_notice_ticks: 1_000,

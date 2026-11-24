@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tetradynamo-core", "crates/tetrad-term", "crates/tetrad-python"]
+members = ["crates/tetradynamo-core", "crates/tetrad-term", "crates/tetrad-python", "crates/tetrad-macroquad"]
 resolver = "2"
 
 [workspace.package]

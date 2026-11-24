@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import secrets
 from pathlib import Path
 from time import perf_counter
 
@@ -29,6 +30,8 @@ KEY_UP = {
     pygame.K_RIGHT: "right_release", pygame.K_d: "right_release",
     pygame.K_DOWN: "soft_drop_release", pygame.K_s: "soft_drop_release",
 }
+PAUSE_OPTIONS = ("RESUME", "RESTART", "RETURN TO TITLE")
+KONAMI = (pygame.K_UP, pygame.K_UP, pygame.K_DOWN, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_b, pygame.K_a)
 
 
 def text(surface, font, value, position, color=RED, center=False):
@@ -86,6 +89,41 @@ def focus_loss_commands():
     return ["left_release", "right_release", "soft_drop_release", "pause"]
 
 
+def random_seed():
+    return secrets.randbits(64)
+
+
+def parse_seed(value):
+    try:
+        seed = int(value, 0)
+    except ValueError:
+        return None
+    return seed if 0 <= seed <= 0xFFFF_FFFF_FFFF_FFFF else None
+
+
+def countdown_label(snapshot):
+    phase = snapshot["phase"]
+    if phase == "ready":
+        return "GET READY"
+    if phase in ("startcountdown", "resumecountdown"):
+        return str(max(1, (snapshot["timers"]["phase_remaining_ticks"] + 999) // 1000))
+    return None
+
+
+def logical_mouse(position, window_size):
+    width, height = window_size
+    scale = min(width / LOGICAL_SIZE[0], height / LOGICAL_SIZE[1])
+    return ((position[0] - (width - LOGICAL_SIZE[0] * scale) / 2) / scale,
+            (position[1] - (height - LOGICAL_SIZE[1] * scale) / 2) / scale)
+
+
+def pause_option_at(position):
+    x, y = position
+    if 520 <= x <= 760 and 390 <= y < 480:
+        return int((y - 390) // 30)
+    return None
+
+
 def clearing_cell_is_white(clearing_rows, clear_ticks, board_row, column):
     return board_row in clearing_rows and clear_ticks < (column + 1) * 25
 
@@ -111,24 +149,26 @@ def clear_notice_fragments(notice):
     return [(f"{prefix}{clear}  +{points}", WHITE)]
 
 
-def draw_game(surface, snapshot, fonts, flash_ticks):
+def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed):
     surface.fill(BLACK)
-    tiny, normal, _title_font = fonts
+    tiny, normal, title_font = fonts
     board_x, board_y, cell = 480, 76, 27
     border = WHITE if level_flash_visible(flash_ticks) else RED
     pygame.draw.rect(surface, border, (board_x - 4, board_y - 4, cell * 10 + 8, cell * 20 + 8), 3)
     clearing_rows = snapshot["clearing_rows"]
     clear_ticks = snapshot["timers"]["clear_ticks"]
-    for y, row in enumerate(snapshot["board"][2:]):
-        for x, locked in enumerate(row):
-            rect = (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2)
-            board_row = y + HIDDEN_ROWS
-            if clearing_cell_is_white(clearing_rows, clear_ticks, board_row, x):
-                pygame.draw.rect(surface, WHITE, rect)
-            elif locked and board_row not in clearing_rows:
-                pygame.draw.rect(surface, RED, rect)
-            else:
-                pygame.draw.rect(surface, (56, 0, 0), rect, 1)
+    show_well = snapshot["phase"] in ("falling", "clearing")
+    if show_well:
+        for y, row in enumerate(snapshot["board"][2:]):
+            for x, locked in enumerate(row):
+                rect = (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2)
+                board_row = y + HIDDEN_ROWS
+                if clearing_cell_is_white(clearing_rows, clear_ticks, board_row, x):
+                    pygame.draw.rect(surface, WHITE, rect)
+                elif locked and board_row not in clearing_rows:
+                    pygame.draw.rect(surface, RED, rect)
+                else:
+                    pygame.draw.rect(surface, (56, 0, 0), rect, 1)
     active = snapshot["active"]
     if snapshot["phase"] == "falling":
         for x, y in visible_piece_cells(active["x"], snapshot["ghost_y"], active["cells"]):
@@ -160,24 +200,38 @@ def draw_game(surface, snapshot, fonts, flash_ticks):
         "SPACE       HARD DROP",
         "C/H         HOLD",
         "P           PAUSE",
-        "ESC         QUIT",
+        "ESC         PAUSE",
     ]
     text(surface, normal, "CONTROLS", (1010, 75))
     for index, control in enumerate(controls):
         text(surface, tiny, control, (1010, 112 + index * 23))
+    if show_seed:
+        text(surface, tiny, f"SEED {snapshot['seed']}", (24, 680), (0, 0, 255))
     phase = snapshot["phase"]
-    if phase in ("paused", "gameover", "complete"):
+    if (countdown := countdown_label(snapshot)):
+        text(surface, title_font if countdown == "GET READY" else normal, countdown, (640, 350), WHITE, center=True)
+    if phase == "paused":
+        text(surface, normal, "PAUSED", (640, 300), WHITE, center=True)
+        for index, option in enumerate(PAUSE_OPTIONS):
+            color = WHITE if index == pause_index else RED
+            text(surface, normal, option, (640, 390 + index * 30), color, center=True)
+    if phase in ("gameover", "complete"):
         message = {"paused": "PAUSED", "gameover": "GAME OVER — R TO RESTART", "complete": "MARATHON COMPLETE — R TO RESTART"}[phase]
         text(surface, normal, message, (640, 370), WHITE, center=True)
 
 
-def draw_title(surface, fonts):
+def draw_title(surface, fonts, seed_prompt, seed_text, seed_error):
     surface.fill(BLACK)
     _, normal, title_font = fonts
     fragments(surface, title_font, [("TETRA|", WHITE), ("D", RED)], (640, 210), center=True)
     text(surface, normal, "GAME MODE:", (640, 480), RED, center=True)
     text(surface, normal, "> MARATHON", (640, 520), RED, center=True)
     text(surface, normal, "PRESS ENTER TO START", (640, 600), RED, center=True)
+    if seed_prompt:
+        text(surface, normal, "ENTER SEED (DECIMAL OR 0xHEX)", (640, 300), WHITE, center=True)
+        text(surface, normal, seed_text or "_", (640, 340), WHITE, center=True)
+        if seed_error:
+            text(surface, tiny, "INVALID UNSIGNED 64-BIT SEED", (640, 375), RED, center=True)
 
 
 def main():
@@ -188,25 +242,89 @@ def main():
     fonts = (pygame.font.SysFont("consolas", 20, bold=True), pygame.font.SysFont("consolas", 28, bold=True), pygame.font.SysFont("consolas", 54, bold=True))
     game = Game(0x544554524144)
     snapshot, pending = game.snapshot(), []
+    pause_index, seed_locked, show_seed = 0, False, False
+    seed_prompt, seed_text, seed_error, konami = False, "", False, []
     accumulator, previous, running, flash = 0.0, perf_counter(), True, 0
+
+    def apply(result):
+        nonlocal snapshot, flash
+        snapshot = result["snapshot"]
+        if any(item["type"] == "level_changed" for item in result["events"]):
+            flash = 500
+
+    def select_pause_option():
+        nonlocal pause_index, seed_locked, show_seed
+        if pause_index == 0:
+            pending.append("resume")
+        elif pause_index == 1:
+            apply(game.restart_with_seed(snapshot["seed"] if seed_locked else random_seed()))
+        else:
+            apply(game.return_to_title())
+
     while running:
         now = perf_counter(); accumulator += min(now - previous, 0.25); previous = now
         for event in pygame.event.get():
             if event.type == pygame.QUIT: running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE: running = False
-                elif event.key == pygame.K_p:
-                    pending.append("resume" if snapshot["phase"] == "paused" else "pause")
-                elif event.key in KEY_DOWN: pending.append(KEY_DOWN[event.key])
+                if seed_prompt:
+                    if event.key == pygame.K_ESCAPE:
+                        seed_prompt, seed_error = False, False
+                    elif event.key == pygame.K_BACKSPACE:
+                        seed_text = seed_text[:-1]
+                    elif event.key == pygame.K_RETURN:
+                        seed = parse_seed(seed_text)
+                        if seed is None:
+                            seed_error = True
+                        else:
+                            seed_locked, show_seed, seed_prompt, seed_error = True, True, False, False
+                            apply(game.start_with_seed(seed))
+                    elif event.unicode and event.unicode in "0123456789abcdefABCDEFxX":
+                        seed_text += event.unicode
+                    continue
+                if snapshot["phase"] in ("title", "paused"):
+                    konami = (konami + [event.key])[-len(KONAMI):]
+                    if tuple(konami) == KONAMI:
+                        konami = []
+                        if snapshot["phase"] == "title":
+                            seed_prompt, seed_text, seed_error = True, "", False
+                        else:
+                            seed_locked = not seed_locked
+                            show_seed = seed_locked
+                        continue
+                if event.key == pygame.K_ESCAPE or event.key == pygame.K_p:
+                    if snapshot["phase"] == "paused":
+                        pending.append("resume")
+                    elif snapshot["phase"] in ("falling", "clearing"):
+                        pending.append("pause")
+                elif snapshot["phase"] == "title" and event.key == pygame.K_RETURN:
+                    apply(game.start_with_seed(snapshot["seed"] if seed_locked else random_seed()))
+                elif snapshot["phase"] == "paused":
+                    if event.key == pygame.K_UP:
+                        pause_index = (pause_index - 1) % len(PAUSE_OPTIONS)
+                    elif event.key == pygame.K_DOWN:
+                        pause_index = (pause_index + 1) % len(PAUSE_OPTIONS)
+                    elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
+                        select_pause_option()
+                elif event.key in KEY_DOWN:
+                    pending.append(KEY_DOWN[event.key])
             elif event.type == pygame.KEYUP and event.key in KEY_UP: pending.append(KEY_UP[event.key])
             elif event.type == pygame.WINDOWFOCUSLOST:
                 pending.extend(focus_loss_commands())
+            elif event.type == pygame.MOUSEMOTION and snapshot["phase"] == "paused":
+                option = pause_option_at(logical_mouse(event.pos, window.get_size()))
+                if option is not None:
+                    pause_index = option
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and snapshot["phase"] == "paused":
+                option = pause_option_at(logical_mouse(event.pos, window.get_size()))
+                if option is not None:
+                    pause_index = option
+                    select_pause_option()
         while accumulator >= 1 / TICK_HZ:
             result = game.step(pending); pending = []; snapshot = result["snapshot"]
             if any(event["type"] == "level_changed" for event in result["events"]): flash = 500
             flash = max(0, flash - 1); accumulator -= 1 / TICK_HZ
-        if snapshot["phase"] == "title": draw_title(logical, fonts)
-        else: draw_game(logical, snapshot, fonts, flash)
+        if snapshot["phase"] == "title": draw_title(logical, fonts, seed_prompt, seed_text, seed_error)
+        else: draw_game(logical, snapshot, fonts, flash, pause_index, show_seed)
         width, height = window.get_size(); scale = min(width / LOGICAL_SIZE[0], height / LOGICAL_SIZE[1])
         scaled = pygame.transform.smoothscale(logical, (int(LOGICAL_SIZE[0] * scale), int(LOGICAL_SIZE[1] * scale)))
         window.fill(BLACK); window.blit(scaled, ((width - scaled.get_width()) // 2, (height - scaled.get_height()) // 2)); pygame.display.flip()

@@ -52,6 +52,27 @@ impl PyGame {
         output.set_item("snapshot", snapshot_to_py(py, &result.snapshot)?)?;
         Ok(output.into_any().unbind())
     }
+    fn start_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<Py<PyAny>> {
+        let result = self.game.start_with_seed(seed);
+        let output = PyDict::new(py);
+        output.set_item("events", events_to_py(py, &result.events))?;
+        output.set_item("snapshot", snapshot_to_py(py, &result.snapshot)?)?;
+        Ok(output.into_any().unbind())
+    }
+    fn restart_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<Py<PyAny>> {
+        let result = self.game.restart_with_seed(seed);
+        let output = PyDict::new(py);
+        output.set_item("events", events_to_py(py, &result.events))?;
+        output.set_item("snapshot", snapshot_to_py(py, &result.snapshot)?)?;
+        Ok(output.into_any().unbind())
+    }
+    fn return_to_title(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let result = self.game.return_to_title();
+        let output = PyDict::new(py);
+        output.set_item("events", events_to_py(py, &result.events))?;
+        output.set_item("snapshot", snapshot_to_py(py, &result.snapshot)?)?;
+        Ok(output.into_any().unbind())
+    }
 }
 
 #[pymodule]
@@ -75,6 +96,7 @@ fn tetradynamo(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "resume",
             "start",
             "restart",
+            "return_to_title",
         ],
     )?;
     Ok(())
@@ -96,6 +118,7 @@ fn parse_command(value: &str) -> PyResult<Command> {
         "resume" => Ok(Command::Resume),
         "start" => Ok(Command::Start),
         "restart" => Ok(Command::Restart),
+        "return_to_title" => Ok(Command::ReturnToTitle),
         _ => Err(PyValueError::new_err(format!(
             "unknown Dynamo command: {value}"
         ))),
@@ -153,7 +176,12 @@ fn snapshot_to_py<'py>(py: Python<'py>, snapshot: &GameSnapshot) -> PyResult<Bou
     timers.set_item("lock_ticks", snapshot.timers.lock_ticks)?;
     timers.set_item("clear_ticks", snapshot.timers.clear_ticks)?;
     timers.set_item("clear_notice_ticks", snapshot.timers.clear_notice_ticks)?;
+    timers.set_item(
+        "phase_remaining_ticks",
+        snapshot.timers.phase_remaining_ticks,
+    )?;
     value.set_item("board", board)?;
+    value.set_item("seed", snapshot.seed)?;
     value.set_item("active", active)?;
     value.set_item("ghost_y", snapshot.ghost_y)?;
     value.set_item("hold", snapshot.hold.map(piece_name))?;
@@ -209,6 +237,16 @@ fn events_to_py<'py>(py: Python<'py>, events: &[GameEvent]) -> Bound<'py, PyList
             }
             GameEvent::Resumed => {
                 value.set_item("type", "resumed").unwrap();
+            }
+            GameEvent::ReadyStarted => {
+                value.set_item("type", "ready_started").unwrap();
+            }
+            GameEvent::CountdownStarted { resume } => {
+                value.set_item("type", "countdown_started").unwrap();
+                value.set_item("resume", resume).unwrap();
+            }
+            GameEvent::ReturnedToTitle => {
+                value.set_item("type", "returned_to_title").unwrap();
             }
             GameEvent::Spawned { kind } => {
                 value.set_item("type", "spawned").unwrap();

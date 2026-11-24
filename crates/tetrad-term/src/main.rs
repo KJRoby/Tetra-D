@@ -13,13 +13,24 @@ use ratatui::{
 };
 use std::{
     io,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tetradynamo_core::{
     shape_cells, Board, Command, Game, Phase, PieceKind, HEIGHT, HIDDEN_ROWS, WIDTH,
 };
 
 const RED: Color = Color::Rgb(255, 0, 0);
+const BLUE: Color = Color::Rgb(0, 0, 255);
+
+#[derive(Default)]
+struct SeedControl {
+    locked: bool,
+    show: bool,
+    prompt: bool,
+    value: String,
+    error: bool,
+    code: Vec<KeyCode>,
+}
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
     let mut out = io::stdout();
@@ -34,6 +45,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
     let mut last = Instant::now();
     let mut acc = Duration::ZERO;
     let mut pending_commands = Vec::new();
+    let mut pause_index = 0_u8;
+    let mut seed_control = SeedControl::default();
     let mut level_flash_ticks = 0_u32;
     loop {
         let now = Instant::now();
@@ -56,8 +69,83 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         }
         while event::poll(Duration::ZERO)? {
             if let Event::Key(k) = event::read()? {
-                if k.code == KeyCode::Esc {
-                    return Ok(());
+                if seed_control.prompt && k.kind != KeyEventKind::Release {
+                    match k.code {
+                        KeyCode::Esc => {
+                            seed_control.prompt = false;
+                            seed_control.error = false;
+                        }
+                        KeyCode::Backspace => {
+                            seed_control.value.pop();
+                            seed_control.error = false;
+                        }
+                        KeyCode::Enter => match parse_seed(&seed_control.value) {
+                            Some(seed) => {
+                                seed_control.locked = true;
+                                seed_control.show = true;
+                                seed_control.prompt = false;
+                                seed_control.error = false;
+                                game.start_with_seed(seed);
+                            }
+                            None => seed_control.error = true,
+                        },
+                        KeyCode::Char(character)
+                            if seed_character_allowed(&seed_control.value, character) =>
+                        {
+                            seed_control.value.push(character);
+                            seed_control.error = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if matches!(game.phase, Phase::Title | Phase::Paused)
+                    && k.kind != KeyEventKind::Release
+                    && register_konami(&mut seed_control.code, k.code)
+                {
+                    if game.phase == Phase::Title {
+                        seed_control.prompt = true;
+                        seed_control.value.clear();
+                        seed_control.error = false;
+                    } else {
+                        seed_control.locked = !seed_control.locked;
+                        seed_control.show = seed_control.locked;
+                    }
+                    continue;
+                }
+                if game.phase == Phase::Title && k.kind != KeyEventKind::Release {
+                    if k.code == KeyCode::Enter {
+                        let seed = if seed_control.locked {
+                            game.snapshot().seed
+                        } else {
+                            random_seed()
+                        };
+                        game.start_with_seed(seed);
+                    }
+                    continue;
+                }
+                if game.phase == Phase::Paused && k.kind != KeyEventKind::Release {
+                    match k.code {
+                        KeyCode::Up => pause_index = (pause_index + 2) % 3,
+                        KeyCode::Down => pause_index = (pause_index + 1) % 3,
+                        KeyCode::Enter | KeyCode::Char(' ') => match pause_index {
+                            0 => pending_commands.push(Command::Resume),
+                            1 => {
+                                let seed = if seed_control.locked {
+                                    game.snapshot().seed
+                                } else {
+                                    random_seed()
+                                };
+                                game.restart_with_seed(seed);
+                            }
+                            _ => {
+                                game.return_to_title();
+                            }
+                        },
+                        KeyCode::Esc | KeyCode::Char('p') => pending_commands.push(Command::Resume),
+                        _ => {}
+                    }
+                    continue;
                 }
                 if let Some(c) = command(k.code, k.kind) {
                     let c = if c == Command::Pause && game.phase == Phase::Paused {
@@ -65,7 +153,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                     } else {
                         c
                     };
-                    pending_commands.push(c);
+                    if c == Command::Restart {
+                        let seed = if seed_control.locked {
+                            game.snapshot().seed
+                        } else {
+                            random_seed()
+                        };
+                        game.restart_with_seed(seed);
+                    } else {
+                        pending_commands.push(c);
+                    }
                     // Key-release events are not consistently available across
                     // Windows, macOS, and Linux terminals. Treat a press as a
                     // reliable tap; terminals that repeat a held key still give
@@ -78,7 +175,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                 }
             }
         }
-        terminal.draw(|f| draw(f.area(), f, &game, level_flash_ticks))?;
+        terminal.draw(|f| {
+            draw(
+                f.area(),
+                f,
+                &game,
+                level_flash_ticks,
+                pause_index,
+                &seed_control,
+            )
+        })?;
         std::thread::sleep(Duration::from_millis(8));
     }
 }
@@ -104,19 +210,87 @@ fn command(k: KeyCode, kind: KeyEventKind) -> Option<Command> {
         (KeyCode::Char('z'), true) => Command::RotateCcw,
         (KeyCode::Char(' '), true) => Command::HardDrop,
         (KeyCode::Char('c'), true) | (KeyCode::Char('h'), true) => Command::Hold,
-        (KeyCode::Char('p'), true) => Command::Pause,
+        (KeyCode::Esc, true) | (KeyCode::Char('p'), true) => Command::Pause,
         (KeyCode::Enter, true) => Command::Start,
         (KeyCode::Char('r'), true) => Command::Restart,
         _ => return None,
     })
 }
-fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash_ticks: u32) {
+fn random_seed() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    nanos ^ nanos.rotate_left(17) ^ 0xA076_1D64_78BD_642F
+}
+
+fn parse_seed(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse().ok()
+    }
+}
+
+fn seed_character_allowed(value: &str, character: char) -> bool {
+    character.is_ascii_digit()
+        || (matches!(character, 'x' | 'X') && (value == "0" || value.is_empty()))
+        || (character.is_ascii_hexdigit() && (value.starts_with("0x") || value.starts_with("0X")))
+}
+
+fn register_konami(code: &mut Vec<KeyCode>, key: KeyCode) -> bool {
+    const KONAMI: [KeyCode; 10] = [
+        KeyCode::Up,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Char('b'),
+        KeyCode::Char('a'),
+    ];
+    let key = match key {
+        KeyCode::Char(character) => KeyCode::Char(character.to_ascii_lowercase()),
+        key => key,
+    };
+    if !matches!(
+        key,
+        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::Char('a' | 'b')
+    ) {
+        return false;
+    }
+    code.push(key);
+    if code.len() > KONAMI.len() {
+        code.remove(0);
+    }
+    if code.as_slice() == KONAMI {
+        code.clear();
+        true
+    } else {
+        false
+    }
+}
+
+fn draw(
+    area: Rect,
+    f: &mut ratatui::Frame,
+    g: &Game,
+    level_flash_ticks: u32,
+    pause_index: u8,
+    seed_control: &SeedControl,
+) {
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Black)),
         area,
     );
     if g.phase == Phase::Title {
-        title(area, f);
+        title(area, f, seed_control);
         return;
     }
     let cols = Layout::default()
@@ -160,19 +334,23 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash_ticks: u32) {
         h,
     );
     f.render_widget(
-        Paragraph::new(board_art(&g.board, g))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(
-                        Style::default().fg(if level_flash_visible(level_flash_ticks) {
-                            Color::White
-                        } else {
-                            RED
-                        }),
-                    ),
-            )
-            .style(Style::default().fg(RED)),
+        Paragraph::new(if matches!(g.phase, Phase::Falling | Phase::Clearing) {
+            board_art(&g.board, g)
+        } else {
+            vec![]
+        })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default().fg(if level_flash_visible(level_flash_ticks) {
+                        Color::White
+                    } else {
+                        RED
+                    }),
+                ),
+        )
+        .style(Style::default().fg(RED)),
         board_area,
     );
     if let Some(chain) = chain_label(g.combo) {
@@ -194,6 +372,17 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash_ticks: u32) {
                 x: board_area.x,
                 y: board_area.bottom(),
                 width: board_area.width,
+                height: 1,
+            },
+        );
+    }
+    if seed_control.show {
+        f.render_widget(
+            Paragraph::new(format!("SEED {}", g.snapshot().seed)).style(Style::default().fg(BLUE)),
+            Rect {
+                x: area.x + 1,
+                y: area.bottom().saturating_sub(1),
+                width: area.width / 2,
                 height: 1,
             },
         );
@@ -224,11 +413,31 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash_ticks: u32) {
             },
         );
     }
-    if matches!(g.phase, Phase::Paused | Phase::GameOver | Phase::Complete) {
+    if matches!(
+        g.phase,
+        Phase::Paused
+            | Phase::GameOver
+            | Phase::Complete
+            | Phase::Ready
+            | Phase::StartCountdown
+            | Phase::ResumeCountdown
+    ) {
         let t = match g.phase {
             Phase::Paused => "PAUSED",
             Phase::GameOver => "GAME OVER — R TO RESTART",
-            _ => "MARATHON COMPLETE — R TO RESTART",
+            Phase::Complete => "MARATHON COMPLETE — R TO RESTART",
+            Phase::Ready => "GET READY",
+            Phase::StartCountdown | Phase::ResumeCountdown => {
+                let remaining = g.snapshot().timers.phase_remaining_ticks;
+                if remaining > 2_000 {
+                    "3"
+                } else if remaining > 1_000 {
+                    "2"
+                } else {
+                    "1"
+                }
+            }
+            _ => unreachable!(),
         };
         f.render_widget(
             Paragraph::new(t)
@@ -241,6 +450,25 @@ fn draw(area: Rect, f: &mut ratatui::Frame, g: &Game, level_flash_ticks: u32) {
                 height: 2,
             },
         );
+        if g.phase == Phase::Paused {
+            for (index, option) in ["RESUME", "RESTART", "RETURN TO TITLE"].iter().enumerate() {
+                f.render_widget(
+                    Paragraph::new(*option).alignment(Alignment::Center).style(
+                        Style::default().fg(if pause_index == index as u8 {
+                            Color::White
+                        } else {
+                            RED
+                        }),
+                    ),
+                    Rect {
+                        x: mid.x,
+                        y: mid.y + 12 + index as u16,
+                        width: mid.width,
+                        height: 1,
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -257,8 +485,8 @@ fn level_flash_visible(remaining: u32) -> bool {
     elapsed < 125 || (250..375).contains(&elapsed)
 }
 
-fn title(area: Rect, f: &mut ratatui::Frame) {
-    let lines = vec![
+fn title(area: Rect, f: &mut ratatui::Frame, seed_control: &SeedControl) {
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 "TETRA|",
@@ -285,6 +513,27 @@ fn title(area: Rect, f: &mut ratatui::Frame) {
             Style::default().fg(RED),
         )),
     ];
+    if seed_control.prompt {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "ENTER SEED (DECIMAL OR 0xHEX)",
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(Span::styled(
+            if seed_control.value.is_empty() {
+                "_"
+            } else {
+                &seed_control.value
+            },
+            Style::default().fg(Color::White),
+        )));
+        if seed_control.error {
+            lines.push(Line::from(Span::styled(
+                "INVALID UNSIGNED 64-BIT SEED",
+                Style::default().fg(RED),
+            )));
+        }
+    }
     f.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Center)
@@ -402,7 +651,7 @@ mod tests {
         let mut game = Game::new(7);
         game.step(&[Command::Start]).unwrap();
         terminal
-            .draw(|frame| draw(frame.area(), frame, &game, 0))
+            .draw(|frame| draw(frame.area(), frame, &game, 0, 0, &SeedControl::default()))
             .unwrap();
     }
 }

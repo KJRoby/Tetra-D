@@ -55,13 +55,17 @@ pub enum Command {
     Resume,
     Start,
     Restart,
+    ReturnToTitle,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Title,
+    Ready,
+    StartCountdown,
     Falling,
     Clearing,
     Paused,
+    ResumeCountdown,
     GameOver,
     Complete,
 }
@@ -112,6 +116,11 @@ pub enum GameEvent {
     },
     Paused,
     Resumed,
+    ReadyStarted,
+    CountdownStarted {
+        resume: bool,
+    },
+    ReturnedToTitle,
     Spawned {
         kind: PieceKind,
     },
@@ -175,10 +184,12 @@ pub struct Timers {
     pub lock_ticks: u32,
     pub clear_ticks: u32,
     pub clear_notice_ticks: u32,
+    pub phase_remaining_ticks: u32,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GameSnapshot {
     pub board: [[Option<PieceKind>; WIDTH as usize]; HEIGHT as usize],
+    pub seed: u64,
     pub active: ActivePiece,
     pub ghost_y: i8,
     pub hold: Option<PieceKind>,
@@ -216,6 +227,8 @@ pub struct Game {
     lock: u32,
     clear: u32,
     notice_time: u32,
+    phase_timer: u32,
+    paused_phase: Option<Phase>,
     pending: Vec<usize>,
     pub clear_notice: Option<ClearNotice>,
     hold_used: bool,
@@ -252,6 +265,8 @@ impl Game {
             lock: 0,
             clear: 0,
             notice_time: 0,
+            phase_timer: 0,
+            paused_phase: None,
             pending: vec![],
             clear_notice: None,
             hold_used: false,
@@ -291,6 +306,7 @@ impl Game {
     pub fn snapshot(&self) -> GameSnapshot {
         GameSnapshot {
             board: *self.board.cells(),
+            seed: self.initial_seed,
             active: self.active,
             ghost_y: self.ghost_y(),
             hold: self.hold,
@@ -312,6 +328,7 @@ impl Game {
                 lock_ticks: self.lock,
                 clear_ticks: self.clear,
                 clear_notice_ticks: self.notice_time,
+                phase_remaining_ticks: self.phase_timer,
             },
         }
     }
@@ -348,6 +365,8 @@ impl Game {
         put(self.lock as u64);
         put(self.clear as u64);
         put(self.notice_time as u64);
+        put(self.phase_timer as u64);
+        put(self.paused_phase.map_or(255, |phase| phase as u8) as u64);
         put(self.horizontal as u64);
         put(self.resets as u64);
         put(self.pending.len() as u64);
@@ -369,6 +388,9 @@ impl Game {
         put(rules.randomizer as u64);
         put(rules.gravity as u64);
         put(rules.timing.lock_delay_ticks as u64);
+        put(rules.timing.ready_ticks as u64);
+        put(rules.timing.countdown_ticks as u64);
+        put(rules.timing.resume_countdown_ticks as u64);
         put(rules.timing.clear_delay_ticks as u64);
         put(rules.timing.clear_notice_ticks as u64);
         put(rules.timing.max_lock_resets as u64);
@@ -400,15 +422,34 @@ impl Game {
         h
     }
     pub fn restart(&mut self) -> StepResult {
-        let seed = self.initial_seed;
-        *self = Self::with_config(seed, self.config.clone());
+        self.restart_with_seed(self.initial_seed)
+    }
+    pub fn start_with_seed(&mut self, seed: u64) -> StepResult {
+        let config = self.config.clone();
+        *self = Self::with_config(seed, config);
+        let mut events = vec![GameEvent::Started];
+        self.begin_ready(&mut events);
         StepResult {
-            events: vec![
-                GameEvent::Restarted { seed },
-                GameEvent::Spawned {
-                    kind: self.active.kind,
-                },
-            ],
+            events,
+            snapshot: self.snapshot(),
+        }
+    }
+    pub fn restart_with_seed(&mut self, seed: u64) -> StepResult {
+        let config = self.config.clone();
+        *self = Self::with_config(seed, config);
+        let mut events = vec![GameEvent::Restarted { seed }];
+        self.begin_ready(&mut events);
+        StepResult {
+            events,
+            snapshot: self.snapshot(),
+        }
+    }
+    pub fn return_to_title(&mut self) -> StepResult {
+        let config = self.config.clone();
+        let seed = self.initial_seed;
+        *self = Self::with_config(seed, config);
+        StepResult {
+            events: vec![GameEvent::ReturnedToTitle],
             snapshot: self.snapshot(),
         }
     }
@@ -424,13 +465,16 @@ impl Game {
             self.command(c, &mut e)
         }
         self.sim += 1;
-        if self.notice_time > 0 {
+        if matches!(self.phase, Phase::Falling | Phase::Clearing) && self.notice_time > 0 {
             self.notice_time -= 1;
             if self.notice_time == 0 {
                 self.clear_notice = None
             }
         }
         match self.phase {
+            Phase::Ready => self.ready(&mut e),
+            Phase::StartCountdown => self.start_countdown(&mut e),
+            Phase::ResumeCountdown => self.resume_countdown(&mut e),
             Phase::Falling => self.falling(&mut e),
             Phase::Clearing => self.clearing(&mut e),
             _ => {}
@@ -443,23 +487,36 @@ impl Game {
     fn command(&mut self, c: Command, e: &mut Vec<GameEvent>) {
         match c {
             Command::Start if self.phase == Phase::Title => {
-                self.phase = Phase::Falling;
                 e.push(GameEvent::Started);
-                e.push(GameEvent::Spawned {
-                    kind: self.active.kind,
-                })
+                self.begin_ready(e)
             }
-            Command::Restart if matches!(self.phase, Phase::GameOver | Phase::Complete) => {
+            Command::Restart
+                if matches!(
+                    self.phase,
+                    Phase::Paused | Phase::GameOver | Phase::Complete
+                ) =>
+            {
                 e.extend(self.restart().events)
             }
-            Command::Pause if self.phase == Phase::Falling => {
+            Command::ReturnToTitle
+                if matches!(
+                    self.phase,
+                    Phase::Paused | Phase::GameOver | Phase::Complete
+                ) =>
+            {
+                e.extend(self.return_to_title().events)
+            }
+            Command::Pause if matches!(self.phase, Phase::Falling | Phase::Clearing) => {
+                self.paused_phase = Some(self.phase);
                 self.phase = Phase::Paused;
                 self.clear_input();
                 e.push(GameEvent::Paused)
             }
             Command::Resume if self.phase == Phase::Paused => {
-                self.phase = Phase::Falling;
-                e.push(GameEvent::Resumed)
+                self.phase = Phase::ResumeCountdown;
+                self.phase_timer = self.config.rules.timing.resume_countdown_ticks;
+                e.push(GameEvent::Resumed);
+                e.push(GameEvent::CountdownStarted { resume: true })
             }
             Command::LeftRelease => {
                 self.left = false;
@@ -513,6 +570,34 @@ impl Game {
             Command::HardDrop => self.hard_drop(e),
             Command::Hold => self.hold_piece(e),
             _ => {}
+        }
+    }
+    fn begin_ready(&mut self, e: &mut Vec<GameEvent>) {
+        self.phase = Phase::Ready;
+        self.phase_timer = self.config.rules.timing.ready_ticks;
+        e.push(GameEvent::ReadyStarted);
+    }
+    fn ready(&mut self, e: &mut Vec<GameEvent>) {
+        self.phase_timer = self.phase_timer.saturating_sub(1);
+        if self.phase_timer == 0 {
+            self.phase = Phase::StartCountdown;
+            self.phase_timer = self.config.rules.timing.countdown_ticks;
+            e.push(GameEvent::CountdownStarted { resume: false });
+        }
+    }
+    fn start_countdown(&mut self, e: &mut Vec<GameEvent>) {
+        self.phase_timer = self.phase_timer.saturating_sub(1);
+        if self.phase_timer == 0 {
+            self.phase = Phase::Falling;
+            e.push(GameEvent::Spawned {
+                kind: self.active.kind,
+            });
+        }
+    }
+    fn resume_countdown(&mut self, _e: &mut Vec<GameEvent>) {
+        self.phase_timer = self.phase_timer.saturating_sub(1);
+        if self.phase_timer == 0 {
+            self.phase = self.paused_phase.take().unwrap_or(Phase::Falling);
         }
     }
     fn falling(&mut self, e: &mut Vec<GameEvent>) {
@@ -986,6 +1071,10 @@ fn kicks(k: PieceKind, f: u8, t: u8) -> &'static [(i8, i8)] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn start_falling(game: &mut Game) {
+        game.phase = Phase::Falling;
+        game.phase_timer = 0;
+    }
     #[test]
     fn zero_seed_bag() {
         let a = Game::new(0);
@@ -999,7 +1088,7 @@ mod tests {
     #[test]
     fn one_tick_for_batch() {
         let mut g = Game::new(1);
-        g.step(&[Command::Start]).unwrap();
+        start_falling(&mut g);
         let n = g.snapshot().timers.simulation_ticks;
         g.step(&[Command::RotateCw, Command::HardDrop]).unwrap();
         assert_eq!(g.snapshot().timers.simulation_ticks, n + 1)
@@ -1009,7 +1098,8 @@ mod tests {
         let mut g = Game::new(0);
         g.phase = Phase::GameOver;
         g.restart();
-        assert_eq!(g.state_hash(), Game::new(0).state_hash())
+        assert_eq!(g.initial_seed(), 0);
+        assert_eq!(g.phase, Phase::Ready)
     }
     #[test]
     fn oversized_batch_is_rejected_without_advancing() {
@@ -1024,13 +1114,9 @@ mod tests {
     #[test]
     fn pause_clears_latched_input() {
         let mut game = Game::new(7);
-        game.step(&[
-            Command::Start,
-            Command::LeftPress,
-            Command::SoftDropPress,
-            Command::Pause,
-        ])
-        .unwrap();
+        start_falling(&mut game);
+        game.step(&[Command::LeftPress, Command::SoftDropPress, Command::Pause])
+            .unwrap();
         assert!(!game.left && !game.right && !game.soft);
         game.step(&[Command::Resume]).unwrap();
         assert!(!game.left && !game.right && !game.soft);
@@ -1038,24 +1124,25 @@ mod tests {
     #[test]
     fn only_resume_can_unpause() {
         let mut game = Game::new(7);
-        game.step(&[Command::Start, Command::Pause]).unwrap();
+        start_falling(&mut game);
+        game.step(&[Command::Pause]).unwrap();
         game.step(&[Command::RotateCw, Command::HardDrop, Command::Pause])
             .unwrap();
         assert_eq!(game.phase, Phase::Paused);
         game.step(&[Command::Resume]).unwrap();
-        assert_eq!(game.phase, Phase::Falling);
+        assert_eq!(game.phase, Phase::ResumeCountdown);
     }
     #[test]
     fn hold_is_limited_until_lock() {
         let mut game = Game::new(7);
-        game.step(&[Command::Start, Command::Hold, Command::Hold])
-            .unwrap();
+        start_falling(&mut game);
+        game.step(&[Command::Hold, Command::Hold]).unwrap();
         assert!(game.hold_used);
     }
     #[test]
     fn repeated_soft_drop_presses_only_apply_the_initial_drop() {
         let mut game = Game::new(7);
-        game.step(&[Command::Start]).unwrap();
+        start_falling(&mut game);
         let initial_y = game.active.y;
         game.step(&[Command::SoftDropPress, Command::SoftDropPress])
             .unwrap();
@@ -1064,7 +1151,7 @@ mod tests {
     #[test]
     fn soft_drop_does_not_inherit_normal_gravity_progress() {
         let mut game = Game::new(7);
-        game.step(&[Command::Start]).unwrap();
+        start_falling(&mut game);
         game.gravity = gravity_ms(game.config.rules.gravity, game.level) - 1;
         let initial_y = game.active.y;
 
@@ -1077,8 +1164,8 @@ mod tests {
     #[test]
     fn releasing_soft_drop_resets_the_normal_gravity_phase() {
         let mut game = Game::new(7);
-        game.step(&[Command::Start, Command::SoftDropPress])
-            .unwrap();
+        start_falling(&mut game);
+        game.step(&[Command::SoftDropPress]).unwrap();
         game.gravity = 49;
         game.step(&[Command::SoftDropRelease]).unwrap();
         assert_eq!(game.gravity, 1);
@@ -1118,6 +1205,29 @@ mod tests {
         a.step(&[Command::Start]).unwrap();
         b.step(&[Command::Start]).unwrap();
         assert_ne!(a.state_hash(), b.state_hash());
+    }
+    #[test]
+    fn start_and_resume_use_deterministic_countdowns() {
+        let mut game = Game::new(7);
+        let result = game.step(&[Command::Start]).unwrap();
+        assert_eq!(game.phase, Phase::Ready);
+        assert!(result.events.contains(&GameEvent::ReadyStarted));
+        for _ in 0..game.config.rules.timing.ready_ticks {
+            game.step(&[]).unwrap();
+        }
+        assert_eq!(game.phase, Phase::StartCountdown);
+        for _ in 0..game.config.rules.timing.countdown_ticks {
+            game.step(&[]).unwrap();
+        }
+        assert_eq!(game.phase, Phase::Falling);
+        game.step(&[Command::Pause]).unwrap();
+        assert_eq!(game.phase, Phase::Paused);
+        game.step(&[Command::Resume]).unwrap();
+        assert_eq!(game.phase, Phase::ResumeCountdown);
+        for _ in 0..game.config.rules.timing.resume_countdown_ticks {
+            game.step(&[]).unwrap();
+        }
+        assert_eq!(game.phase, Phase::Falling);
     }
     #[test]
     fn horizontal_input_during_clear_moves_the_next_piece_on_spawn() {

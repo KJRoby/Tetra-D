@@ -1,7 +1,7 @@
 # Tetra|D
 
 Tetra|D is an early-alpha deterministic falling-block game with a reusable Rust
-simulation core, Ratatui/Crossterm terminal frontend, and Pygame frontend.
+simulation core plus Ratatui/Crossterm, Pygame, and Macroquad frontends.
 
 The core defaults to the Guideline mechanical ruleset and Marathon game mode.
 See the [architecture](docs/ARCHITECTURE.md), [core API](docs/CORE_API.md),
@@ -14,6 +14,15 @@ and [roadmap](docs/ROADMAP.md) for implementation details and limitations.
 ```powershell
 cargo run -p tetrad-term
 ```
+
+## Native Macroquad frontend
+
+```powershell
+cargo run -p tetrad-macroquad
+```
+
+The Macroquad frontend is a native Rust desktop implementation that uses Dynamo
+Core directly; it does not require Python or the PyO3 binding.
 
 ## Python and Pygame
 
@@ -43,7 +52,9 @@ python frontends/pygame/main.py
 
 `Game.step(commands)` accepts an ordered batch of lowercase commands such as
 `"rotate_cw"` and `"hard_drop"`, advances exactly one 1,000 Hz simulation
-tick, and returns events plus a read-only snapshot dictionary.
+tick, and returns events plus a read-only snapshot dictionary. The binding also
+offers `start_with_seed`, `restart_with_seed`, and `return_to_title` for
+frontend session flow.
 
 The title screen uses a white `TETRA|` and red `D`. Gameplay is deliberately
 monochrome red (`#FF0000`) on black, with HOLD to the left of the well, five
@@ -58,9 +69,16 @@ NEXT previews to the right, and controls in the lower-right corner.
 | Down/S | Soft drop |
 | Space | Hard drop |
 | C/H | Hold |
-| P | Pause |
+| P or Esc | Pause/resume |
+| Up/Down, Enter/Space | Pause-menu selection |
 | R | Restart after game over or completion |
-| Esc | Quit |
+
+After starting Marathon, the core presents a 1.5-second **GET READY** stage and
+a three-second countdown. Pausing hides the well visually; resuming uses the
+same three-second countdown. Enter the standard Konami sequence
+(`Up Up Down Down Left Right Left Right B A`) on the title screen to choose a
+decimal or `0x` hexadecimal seed. Enter it while paused to toggle a visible,
+locked seed for reproducible restarts.
 
 Terminal key-release support is not portable. Directional input is therefore
 implemented as press/repeat movement, which remains reliable in Windows

@@ -5,7 +5,7 @@
 `tetradynamo-core` is the authoritative deterministic simulation. `Game` owns
 the board, active piece, input latches, PRNG state, timers, scoring state, and
 mode progress. `rules` contains mechanical configuration and `mode` contains
-objectives/progression. The terminal and Python/Pygame frontends submit ordered
+objectives/progression. The terminal, Macroquad, and Python/Pygame frontends submit ordered
 commands and render snapshots/events; neither owns gameplay state.
 
 Current core modules:
