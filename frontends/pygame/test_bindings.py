@@ -1,4 +1,5 @@
 import tetradynamo
+from pathlib import Path
 from main import (
     BOARD_WIDTH,
     BOARD_X,
@@ -37,6 +38,12 @@ def test_explicit_seed_start_exposes_ready_phase_and_timer():
     assert result["snapshot"]["seed"] == 42
     assert result["snapshot"]["phase"] == "ready"
     assert result["snapshot"]["timers"]["phase_remaining_ticks"] == 1500
+
+
+def test_replay_fixture_verifies_through_python_binding():
+    fixture = Path(__file__).parents[2] / "crates" / "tetradynamo-core" / "tests" / "fixtures" / "ready-v1.tdr.json"
+    replay = tetradynamo.Replay.from_json(fixture.read_text(encoding="utf-8"))
+    assert replay.verify()["phase"] == "ready"
 
 
 def test_focus_loss_never_requests_resume_and_hidden_rows_are_clipped():

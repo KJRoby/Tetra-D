@@ -1,5 +1,6 @@
 //! Deterministic, frontend-independent falling-block simulation.
-use crate::{Board, GameConfig, GravityCurve, RandomizerConfig, RotationSystem};
+use crate::{Board, ConfigError, GameConfig, GravityCurve, RandomizerConfig, RotationSystem};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 pub const WIDTH: i8 = 10;
 pub const HEIGHT: i8 = 22;
@@ -7,7 +8,8 @@ pub const HIDDEN_ROWS: i8 = 2;
 pub const TICK_HZ: u32 = 1000;
 pub const MAX_COMMANDS_PER_TICK: usize = 32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PieceKind {
     I,
     J,
@@ -27,7 +29,7 @@ impl PieceKind {
         Self::T,
         Self::Z,
     ];
-    fn id(self) -> u8 {
+    pub(crate) fn id(self) -> u8 {
         match self {
             Self::I => 0,
             Self::J => 1,
@@ -39,7 +41,8 @@ impl PieceKind {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Command {
     LeftPress,
     LeftRelease,
@@ -57,7 +60,8 @@ pub enum Command {
     Restart,
     ReturnToTitle,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Phase {
     Title,
     Ready,
@@ -244,6 +248,10 @@ impl Game {
         Self::with_config(seed, GameConfig::default())
     }
     pub fn with_config(seed: u64, config: GameConfig) -> Self {
+        Self::try_with_config(seed, config).expect("invalid GameConfig")
+    }
+    pub fn try_with_config(seed: u64, config: GameConfig) -> Result<Self, ConfigError> {
+        config.validate()?;
         let mut g = Self {
             config,
             board: Board::default(),
@@ -279,7 +287,7 @@ impl Game {
         };
         g.fill();
         g.active = piece(g.take());
-        g
+        Ok(g)
     }
     pub fn config(&self) -> &GameConfig {
         &self.config

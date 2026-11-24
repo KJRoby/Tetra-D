@@ -12,12 +12,14 @@
   all maintained frontends.
 - Optional frontend seed selection and locked-seed restarts for deterministic
   reproduction.
+- Versioned JSON replay recording, playback, verification, and a Macroquad
+  completed-game save flow.
 
 ## Current limitations
 
 - Only Guideline and Marathon presets are implemented.
 - Board dimensions are fixed at 10×22 with two hidden rows.
-- Replay recording and playback do not yet exist.
+- Macroquad replay browsing and visual playback controls do not yet exist.
 - Several engine concepts remain implementation-private pending the next module
   extraction milestone.
 

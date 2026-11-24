@@ -6,12 +6,53 @@ use pyo3::{
     types::{PyDict, PyList},
 };
 use tetradynamo_core::{
-    shape_cells, Clear, ClearNotice, Command, Game, GameEvent, GameSnapshot, PieceKind, Spin,
+    shape_cells, Clear, ClearNotice, Command, Game, GameEvent, GameSnapshot, PieceKind, Replay,
+    Spin,
 };
 
 #[pyclass(name = "Game")]
 struct PyGame {
     game: Game,
+}
+
+#[pyclass(name = "Replay")]
+struct PyReplay {
+    replay: Replay,
+}
+
+#[pymethods]
+impl PyReplay {
+    #[staticmethod]
+    fn from_json(value: &str) -> PyResult<Self> {
+        Replay::from_json(value)
+            .map(|replay| Self { replay })
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn to_json(&self) -> PyResult<String> {
+        self.replay
+            .to_json_pretty()
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn verify(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let verified = self
+            .replay
+            .verify()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let output = PyDict::new(py);
+        output.set_item("final_state_hash", verified.final_state_hash)?;
+        output.set_item("timeline_ticks", verified.timeline_ticks)?;
+        output.set_item("simulation_ticks", verified.simulation_ticks)?;
+        output.set_item(
+            "phase",
+            format!("{:?}", verified.result.phase).to_lowercase(),
+        )?;
+        output.set_item("score", verified.result.score)?;
+        output.set_item("lines", verified.result.lines)?;
+        output.set_item("level", verified.result.level)?;
+        Ok(output.into_any().unbind())
+    }
 }
 
 #[pymethods]
@@ -78,6 +119,7 @@ impl PyGame {
 #[pymodule]
 fn tetradynamo(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyGame>()?;
+    module.add_class::<PyReplay>()?;
     module.add("TICK_HZ", tetradynamo_core::TICK_HZ)?;
     module.add(
         "COMMANDS",

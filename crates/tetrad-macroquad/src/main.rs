@@ -1,11 +1,11 @@
 //! Native Macroquad frontend. Dynamo Core remains the sole gameplay authority.
 
 use macroquad::prelude::*;
-use std::mem;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, mem};
 use tetradynamo_core::{
-    shape_cells, Clear, ClearNotice, Command, Game, GameEvent, GameSnapshot, Phase, PieceKind,
-    Spin, HEIGHT, HIDDEN_ROWS, TICK_HZ,
+    shape_cells, Clear, ClearNotice, Command, GameConfig, GameEvent, GameSnapshot, Phase,
+    PieceKind, ReplayRecorder, Spin, HEIGHT, HIDDEN_ROWS, TICK_HZ,
 };
 
 const LOGICAL_WIDTH: f32 = 1280.0;
@@ -81,6 +81,12 @@ struct SeedControl {
     code: Vec<KeyCode>,
 }
 
+struct SaveOverlay<'a> {
+    prompt: bool,
+    name: &'a str,
+    message: Option<&'a str>,
+}
+
 impl HeldInput {
     fn reconcile(&mut self, pending: &mut Vec<Command>) {
         reconcile_key(
@@ -136,7 +142,7 @@ fn reconcile_key(
 
 #[macroquad::main(window_conf)]
 async fn main() {
-    let mut game = Game::new(0x5445_5452_4144);
+    let mut game = new_recording(0x5445_5452_4144);
     let mut snapshot = game.snapshot();
     let mut held = HeldInput::default();
     let mut pending = Vec::new();
@@ -144,9 +150,43 @@ async fn main() {
     let mut seed_control = SeedControl::default();
     let mut accumulator = 0.0_f32;
     let mut level_flash_ticks = 0_u32;
+    let mut save_prompt = false;
+    let mut save_name = String::new();
+    let mut save_message: Option<(String, f64)> = None;
 
     loop {
-        if matches!(snapshot.phase, Phase::Title | Phase::Paused) && !seed_control.prompt {
+        if save_prompt {
+            if is_key_pressed(KeyCode::Escape) {
+                save_prompt = false;
+            } else if is_key_pressed(KeyCode::Backspace) {
+                save_name.pop();
+            } else if is_key_pressed(KeyCode::Enter) {
+                let name = if save_name.is_empty() {
+                    "marathon"
+                } else {
+                    &save_name
+                };
+                save_message = Some((save_replay(&game, name), get_time()));
+                save_prompt = false;
+            } else {
+                while let Some(character) = get_char_pressed() {
+                    if (character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+                        && save_name.len() < 48
+                    {
+                        save_name.push(character);
+                    }
+                }
+            }
+        } else if matches!(snapshot.phase, Phase::GameOver | Phase::Complete)
+            && is_key_pressed(KeyCode::F5)
+        {
+            save_prompt = true;
+            save_name.clear();
+        }
+        if !save_prompt
+            && matches!(snapshot.phase, Phase::Title | Phase::Paused)
+            && !seed_control.prompt
+        {
             if let Some(key) = konami_key() {
                 seed_control.code.push(key);
                 seed_control.code = seed_control
@@ -171,21 +211,22 @@ async fn main() {
                 }
             }
         }
-        if seed_control.prompt {
+        if !save_prompt && seed_control.prompt {
             seed_prompt_input(&mut game, &mut snapshot, &mut seed_control);
-        } else if snapshot.phase == Phase::Title && is_key_pressed(KeyCode::Enter) {
+        } else if !save_prompt && snapshot.phase == Phase::Title && is_key_pressed(KeyCode::Enter) {
             let seed = if seed_control.locked {
                 snapshot.seed
             } else {
                 random_seed()
             };
+            game = new_recording(seed);
             snapshot = game.start_with_seed(seed).snapshot;
-        } else if matches!(snapshot.phase, Phase::Falling | Phase::Clearing) {
+        } else if !save_prompt && matches!(snapshot.phase, Phase::Falling | Phase::Clearing) {
             held.reconcile(&mut pending);
         } else {
             held.release_all(&mut pending);
         }
-        if !seed_control.prompt && snapshot.phase != Phase::Title {
+        if !save_prompt && !seed_control.prompt && snapshot.phase != Phase::Title {
             queue_actions(&snapshot, &mut held, &mut pending, &mut pause_index);
         }
         if pending.contains(&Command::Restart) {
@@ -195,7 +236,8 @@ async fn main() {
             } else {
                 random_seed()
             };
-            snapshot = game.restart_with_seed(seed).snapshot;
+            game = new_recording(seed);
+            snapshot = game.start_with_seed(seed).snapshot;
         }
         if snapshot.phase == Phase::Paused {
             let view = View::current();
@@ -213,7 +255,8 @@ async fn main() {
                             } else {
                                 random_seed()
                             };
-                            snapshot = game.restart_with_seed(seed).snapshot;
+                            game = new_recording(seed);
+                            snapshot = game.start_with_seed(seed).snapshot;
                         }
                         _ => snapshot = game.return_to_title().snapshot,
                     }
@@ -222,7 +265,14 @@ async fn main() {
         }
 
         accumulator += get_frame_time().min(0.25);
+        if snapshot.phase == Phase::Paused && !pending.contains(&Command::Resume) {
+            accumulator = 0.0;
+        }
         while accumulator >= 1.0 / TICK_HZ as f32 {
+            if snapshot.phase == Phase::Paused && !pending.contains(&Command::Resume) {
+                accumulator = 0.0;
+                break;
+            }
             let commands = mem::take(&mut pending);
             let result = game
                 .step(&commands)
@@ -250,6 +300,14 @@ async fn main() {
                 level_flash_ticks,
                 pause_index,
                 seed_control.show,
+                SaveOverlay {
+                    prompt: save_prompt,
+                    name: &save_name,
+                    message: save_message
+                        .as_ref()
+                        .filter(|(_, since)| get_time() - *since < 3.0)
+                        .map(|(message, _)| message.as_str()),
+                },
             );
         }
         next_frame().await;
@@ -347,6 +405,7 @@ fn draw_game(
     flash_ticks: u32,
     pause_index: u8,
     show_seed: bool,
+    save: SaveOverlay<'_>,
 ) {
     let (board_x, board_y, cell) = (BOARD_X, BOARD_Y, CELL_SIZE);
     let border = if level_flash_visible(flash_ticks) {
@@ -543,6 +602,42 @@ fn draw_game(
         ),
         _ => {}
     }
+    if matches!(snapshot.phase, Phase::GameOver | Phase::Complete) {
+        centered_text(
+            view,
+            "PRESS F5 TO SAVE REPLAY",
+            WELL_CENTER_X,
+            390.0,
+            20.0,
+            WHITE,
+        );
+    }
+    if save.prompt {
+        centered_text(view, "SAVE REPLAY AS", WELL_CENTER_X, 430.0, 24.0, WHITE);
+        centered_text(
+            view,
+            if save.name.is_empty() {
+                "marathon"
+            } else {
+                save.name
+            },
+            WELL_CENTER_X,
+            465.0,
+            24.0,
+            WHITE,
+        );
+        centered_text(
+            view,
+            "ENTER TO SAVE • ESC TO CANCEL",
+            WELL_CENTER_X,
+            500.0,
+            16.0,
+            RED,
+        );
+    }
+    if let Some(message) = save.message {
+        centered_text(view, message, WELL_CENTER_X, 540.0, 16.0, WHITE);
+    }
 }
 
 fn draw_active(
@@ -712,6 +807,27 @@ fn random_seed() -> u64 {
     nanos ^ nanos.rotate_left(17) ^ 0xA076_1D64_78BD_642F
 }
 
+fn new_recording(seed: u64) -> ReplayRecorder {
+    ReplayRecorder::new(seed, GameConfig::default()).expect("default replay configuration is valid")
+}
+
+fn save_replay(recorder: &ReplayRecorder, name: &str) -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let path = format!("replays/{name}-{timestamp}.tdr.json");
+    match recorder.replay().to_json_pretty().and_then(|json| {
+        fs::create_dir_all("replays")
+            .map_err(|error| tetradynamo_core::ReplayError::Invalid(error.to_string()))?;
+        fs::write(&path, json)
+            .map_err(|error| tetradynamo_core::ReplayError::Invalid(error.to_string()))
+    }) {
+        Ok(()) => format!("REPLAY SAVED: {path}"),
+        Err(error) => format!("REPLAY SAVE FAILED: {error}"),
+    }
+}
+
 fn konami_code() -> Vec<KeyCode> {
     vec![
         KeyCode::Up,
@@ -752,7 +868,11 @@ fn parse_seed(value: &str) -> Option<u64> {
     }
 }
 
-fn seed_prompt_input(game: &mut Game, snapshot: &mut GameSnapshot, control: &mut SeedControl) {
+fn seed_prompt_input(
+    game: &mut ReplayRecorder,
+    snapshot: &mut GameSnapshot,
+    control: &mut SeedControl,
+) {
     if is_key_pressed(KeyCode::Escape) {
         control.prompt = false;
         control.error = false;

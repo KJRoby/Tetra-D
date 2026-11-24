@@ -14,6 +14,7 @@ pending clears, active-piece rotation history, hold state, configuration,
 mode progress, lifecycle phase, phase timer, and paused source phase. It is
 intended for regression and replay verification, not a cryptographic digest.
 
-Future replay files will record a seed, immutable configuration, and ordered
-commands keyed by simulation tick. Replay serialization/playback is not yet
-implemented.
+Replays record a seed, immutable configuration, ordered command batches,
+lifecycle operations, event hashes, and periodic state-hash checkpoints. The
+monotonic replay timeline remains unambiguous when a lifecycle restart resets
+the core's internal simulation tick.

@@ -1,0 +1,25 @@
+{
+  "format_version": 1,
+  "simulation_compatibility_version": 1,
+  "state_hash_algorithm_version": 1,
+  "event_hash_algorithm_version": 1,
+  "tick_hz": 1000,
+  "initial_seed": 9,
+  "config": {
+    "rules": {
+      "rotation": "guideline_srs",
+      "randomizer": "seven_bag",
+      "gravity": "guideline",
+      "timing": { "ready_ticks": 1500, "countdown_ticks": 3000, "resume_countdown_ticks": 3000, "lock_delay_ticks": 500, "clear_delay_ticks": 500, "clear_notice_ticks": 1000, "max_lock_resets": 15 },
+      "input": { "das_ticks": 167, "arr_ticks": 33, "soft_drop_divisor": 20, "minimum_soft_drop_ticks": 17 },
+      "hold": { "enabled": true, "once_per_piece": true },
+      "spins": { "detect_t_spins": true },
+      "scoring": { "back_to_back_multiplier_numerator": 3, "back_to_back_multiplier_denominator": 2 }
+    },
+    "mode": { "kind": "marathon", "target_lines": 150, "lines_per_level": 10, "maximum_level": 15 }
+  },
+  "checkpoint_interval_ticks": 1,
+  "frames": [{ "tick": 0, "lifecycle": [{ "start_with_seed": { "seed": 9 } }], "event_hash": 16905562028647400651 }],
+  "checkpoints": [{ "tick": 1, "state_hash": 5663698572544371271 }],
+  "final_state": { "timeline_ticks": 1, "simulation_ticks": 1, "state_hash": 5663698572544371271, "result": { "phase": "ready", "score": 0, "lines": 0, "level": 1 } }
+}

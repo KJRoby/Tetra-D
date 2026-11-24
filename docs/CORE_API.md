@@ -38,3 +38,9 @@ same deterministic tick as their transitions.
 The existing `Game::new`, `step`, `snapshot`, `restart`, `state_hash`, command,
 event, and snapshot contracts remain supported. Python retains its existing
 default `Game(seed=0)` constructor and string command API.
+
+## Replay
+
+`ReplayRecorder` captures lifecycle methods and `step` command batches at the
+authoritative core boundary. `Replay` serializes strict versioned JSON and
+`verify()` performs headless deterministic playback. See [Replay](REPLAY.md).

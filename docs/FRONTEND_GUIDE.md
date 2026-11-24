@@ -18,3 +18,6 @@ effects. They must keep authoritative gameplay in Dynamo Core.
 - Frontends choose session seeds outside the core and call
   `start_with_seed`/`restart_with_seed`; a chosen seed is part of the read-only
   snapshot and can be displayed for replay/debugging.
+- A recording frontend must own the simulation through `ReplayRecorder` and
+  submit only core command batches/lifecycle actions. Do not record physical
+  key events, rendering time, or derived gameplay outcomes.

@@ -7,7 +7,8 @@ The core defaults to the Guideline mechanical ruleset and Marathon game mode.
 See the [architecture](docs/ARCHITECTURE.md), [core API](docs/CORE_API.md),
 [rulesets](docs/RULESETS.md), [game modes](docs/GAME_MODES.md),
 [determinism](docs/DETERMINISM.md), [frontend guide](docs/FRONTEND_GUIDE.md),
-and [roadmap](docs/ROADMAP.md) for implementation details and limitations.
+[replay](docs/REPLAY.md), and [roadmap](docs/ROADMAP.md) for implementation
+details and limitations.
 
 ## Run
 
@@ -23,6 +24,8 @@ cargo run -p tetrad-macroquad
 
 The Macroquad frontend is a native Rust desktop implementation that uses Dynamo
 Core directly; it does not require Python or the PyO3 binding.
+Completed Macroquad games can be saved as verified replay JSON with F5. Files
+are written under `replays/` and can be validated through Dynamo Core.
 
 ## Python and Pygame
 

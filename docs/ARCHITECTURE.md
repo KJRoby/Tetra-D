@@ -15,10 +15,12 @@ Current core modules:
 - `rules`: mechanical ruleset data and Guideline defaults.
 - `mode`: Marathon objective/progression data.
 - `lib`: stable public facade and composed `GameConfig`.
+- `replay`: versioned recording, sparse playback, JSON validation, and
+  headless deterministic verification.
 
 ## Data flow
 
-`frontend input -> Command batch -> Game::step -> events + snapshot -> frontend rendering`.
+`frontend input -> Command batch -> ReplayRecorder/Game::step -> events + snapshot -> frontend rendering`.
 One `step` is always one 1,000 Hz simulation tick.
 
 ## Planned refinement
