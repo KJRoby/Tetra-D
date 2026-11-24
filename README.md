@@ -25,7 +25,8 @@ cargo run -p tetrad-macroquad
 The Macroquad frontend is a native Rust desktop implementation that uses Dynamo
 Core directly; it does not require Python or the PyO3 binding.
 Completed Macroquad games can be saved as verified replay JSON with F5. Files
-are written under `replays/` and can be validated through Dynamo Core.
+are written under `replays/`; choose REPLAY from the Macroquad title menu to
+browse and deterministically play them back.
 
 ## Python and Pygame
 

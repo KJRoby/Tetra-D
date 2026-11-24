@@ -20,9 +20,10 @@ reports exact event/checkpoint/final hash mismatches.
 
 Frontends must record authoritative `Command` batches, not keyboard events.
 Macroquad begins recording on game start, freezes the replay timeline while
-paused, and saves completed sessions with F5 under `replays/`. Playback UI and
-replay browsing are future work; `ReplayPlayer` is the frontend-neutral
-playback API today.
+paused, and saves completed sessions with F5 under `replays/`. Its title-screen
+Replay browser loads compatible files through `ReplayPlayer`, verifies each
+tick during playback, and keeps viewer pause separate from recorded pause
+commands.
 
 ## Fixtures and compatibility
 

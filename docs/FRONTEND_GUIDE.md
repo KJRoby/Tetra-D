@@ -21,3 +21,5 @@ effects. They must keep authoritative gameplay in Dynamo Core.
 - A recording frontend must own the simulation through `ReplayRecorder` and
   submit only core command batches/lifecycle actions. Do not record physical
   key events, rendering time, or derived gameplay outcomes.
+- Playback frontends must advance `ReplayPlayer` only; viewer pause must freeze
+  presentation without submitting commands to the recorded simulation.

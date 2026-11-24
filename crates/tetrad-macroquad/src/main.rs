@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, mem};
 use tetradynamo_core::{
     shape_cells, Clear, ClearNotice, Command, GameConfig, GameEvent, GameSnapshot, Phase,
-    PieceKind, ReplayRecorder, Spin, HEIGHT, HIDDEN_ROWS, TICK_HZ,
+    PieceKind, Replay, ReplayPlayer, ReplayRecorder, Spin, HEIGHT, HIDDEN_ROWS, TICK_HZ,
 };
 
 const LOGICAL_WIDTH: f32 = 1280.0;
@@ -95,6 +95,19 @@ enum TitleScreen {
     Config,
 }
 
+struct ReplayEntry {
+    name: String,
+    replay: Result<Replay, String>,
+}
+struct Playback {
+    replay: Replay,
+    player: ReplayPlayer,
+    snapshot: GameSnapshot,
+    paused: bool,
+    ended: bool,
+    error: Option<String>,
+}
+
 impl HeldInput {
     fn reconcile(&mut self, pending: &mut Vec<Command>) {
         reconcile_key(
@@ -163,8 +176,121 @@ async fn main() {
     let mut save_message: Option<(String, f64)> = None;
     let mut title_screen = TitleScreen::Root;
     let mut title_index = 0_u8;
+    let mut replay_entries = Vec::new();
+    let mut playback: Option<Playback> = None;
 
     loop {
+        if let Some(active) = playback.as_mut() {
+            held = HeldInput::default();
+            pending.clear();
+            if active.ended {
+                if is_key_pressed(KeyCode::R) {
+                    match active.replay.player() {
+                        Ok(player) => {
+                            active.snapshot = player.game().snapshot();
+                            active.player = player;
+                            active.ended = false;
+                            active.error = None;
+                            accumulator = 0.0;
+                        }
+                        Err(error) => active.error = Some(error.to_string()),
+                    }
+                }
+                if is_key_pressed(KeyCode::Escape) {
+                    playback = None;
+                    title_screen = TitleScreen::Root;
+                    title_index = 0;
+                    accumulator = 0.0;
+                    continue;
+                }
+            } else if is_key_pressed(KeyCode::P) || is_key_pressed(KeyCode::Escape) {
+                active.paused = !active.paused;
+                accumulator = 0.0;
+            }
+            if !active.paused && !active.ended {
+                accumulator += get_frame_time().min(0.25);
+                while accumulator >= 1.0 / TICK_HZ as f32 {
+                    match active.player.advance() {
+                        Ok(Some(result)) => {
+                            if result
+                                .events
+                                .iter()
+                                .any(|event| matches!(event, GameEvent::LevelChanged { .. }))
+                            {
+                                level_flash_ticks = 500;
+                            }
+                            active.snapshot = active.player.game().snapshot();
+                        }
+                        Ok(None) => {
+                            active.ended = true;
+                            if let Err(error) = active.player.finish() {
+                                active.error = Some(error.to_string());
+                            }
+                            break;
+                        }
+                        Err(error) => {
+                            active.ended = true;
+                            active.error = Some(error.to_string());
+                            break;
+                        }
+                    }
+                    level_flash_ticks = level_flash_ticks.saturating_sub(1);
+                    accumulator -= 1.0 / TICK_HZ as f32;
+                }
+            }
+            clear_background(BLACK);
+            draw_game(
+                View::current(),
+                &active.snapshot,
+                level_flash_ticks,
+                0,
+                false,
+                SaveOverlay {
+                    prompt: false,
+                    name: "",
+                    message: None,
+                },
+                true,
+            );
+            if active.paused {
+                centered_text(
+                    View::current(),
+                    "REPLAY PAUSED",
+                    WELL_CENTER_X,
+                    300.0,
+                    28.0,
+                    WHITE,
+                );
+                centered_text(View::current(), "RESUME", WELL_CENTER_X, 390.0, 28.0, WHITE);
+            }
+            if active.ended {
+                centered_text(
+                    View::current(),
+                    if active.error.is_some() {
+                        "REPLAY ERROR"
+                    } else {
+                        "REPLAY ENDED"
+                    },
+                    WELL_CENTER_X,
+                    350.0,
+                    28.0,
+                    WHITE,
+                );
+                centered_text(
+                    View::current(),
+                    active
+                        .error
+                        .as_deref()
+                        .unwrap_or("R — REPLAY AGAIN   ESC — RETURN TO TITLE"),
+                    WELL_CENTER_X,
+                    390.0,
+                    16.0,
+                    RED,
+                );
+            }
+            next_frame().await;
+            continue;
+        }
         if save_prompt {
             if is_key_pressed(KeyCode::Escape) {
                 save_prompt = false;
@@ -227,6 +353,8 @@ async fn main() {
                 3
             } else if title_screen == TitleScreen::Solo {
                 1
+            } else if title_screen == TitleScreen::Replay {
+                replay_entries.len().min(u8::MAX as usize) as u8
             } else {
                 0
             };
@@ -242,7 +370,10 @@ async fn main() {
                     TitleScreen::Root => {
                         title_screen = match title_index {
                             0 => TitleScreen::Solo,
-                            1 => TitleScreen::Replay,
+                            1 => {
+                                replay_entries = discover_replays();
+                                TitleScreen::Replay
+                            }
                             _ => TitleScreen::Config,
                         };
                         title_index = 0;
@@ -255,6 +386,30 @@ async fn main() {
                         };
                         game = new_recording(seed);
                         snapshot = game.start_with_seed(seed).snapshot;
+                    }
+                    TitleScreen::Replay => {
+                        if let Some(entry) = replay_entries.get(title_index as usize) {
+                            if let Ok(replay) = &entry.replay {
+                                match replay.player() {
+                                    Ok(player) => {
+                                        let replay = replay.clone();
+                                        let snapshot = player.game().snapshot();
+                                        playback = Some(Playback {
+                                            replay,
+                                            player,
+                                            snapshot,
+                                            paused: false,
+                                            ended: false,
+                                            error: None,
+                                        });
+                                        accumulator = 0.0;
+                                    }
+                                    Err(error) => {
+                                        save_message = Some((error.to_string(), get_time()))
+                                    }
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -314,6 +469,8 @@ async fn main() {
                 3
             } else if title_screen == TitleScreen::Solo {
                 1
+            } else if title_screen == TitleScreen::Replay {
+                replay_entries.len().min(u8::MAX as usize) as u8
             } else {
                 0
             };
@@ -324,7 +481,10 @@ async fn main() {
                         TitleScreen::Root => {
                             title_screen = match title_index {
                                 0 => TitleScreen::Solo,
-                                1 => TitleScreen::Replay,
+                                1 => {
+                                    replay_entries = discover_replays();
+                                    TitleScreen::Replay
+                                }
                                 _ => TitleScreen::Config,
                             };
                             title_index = 0;
@@ -337,6 +497,25 @@ async fn main() {
                             };
                             game = new_recording(seed);
                             snapshot = game.start_with_seed(seed).snapshot;
+                        }
+                        TitleScreen::Replay => {
+                            if let Some(entry) = replay_entries.get(title_index as usize) {
+                                if let Ok(replay) = &entry.replay {
+                                    if let Ok(player) = replay.player() {
+                                        let replay = replay.clone();
+                                        let snapshot = player.game().snapshot();
+                                        playback = Some(Playback {
+                                            replay,
+                                            player,
+                                            snapshot,
+                                            paused: false,
+                                            ended: false,
+                                            error: None,
+                                        });
+                                        accumulator = 0.0;
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -372,7 +551,13 @@ async fn main() {
         let view = View::current();
         clear_background(BLACK);
         if snapshot.phase == Phase::Title {
-            draw_title(view, &seed_control, title_screen, title_index);
+            draw_title(
+                view,
+                &seed_control,
+                title_screen,
+                title_index,
+                &replay_entries,
+            );
         } else {
             draw_game(
                 view,
@@ -388,6 +573,7 @@ async fn main() {
                         .filter(|(_, since)| get_time() - *since < 3.0)
                         .map(|(message, _)| message.as_str()),
                 },
+                false,
             );
         }
         next_frame().await;
@@ -486,6 +672,7 @@ fn draw_game(
     pause_index: u8,
     show_seed: bool,
     save: SaveOverlay<'_>,
+    replay_playback: bool,
 ) {
     let (board_x, board_y, cell) = (BOARD_X, BOARD_Y, CELL_SIZE);
     let border = if level_flash_visible(flash_ticks) {
@@ -622,15 +809,27 @@ fn draw_game(
     }
 
     text(view, "CONTROLS", 1010.0, 75.0, 28.0, RED);
-    for (index, value) in [
-        "ARROWS/A D  MOVE",
-        "UP/X, Z     ROTATE",
-        "DOWN/S      SOFT DROP",
-        "SPACE       HARD DROP",
-        "C/H         HOLD",
-        "P           PAUSE",
-        "ESC         PAUSE",
-    ]
+    for (index, value) in if replay_playback {
+        [
+            "REPLAY",
+            "P/ESC       PAUSE",
+            "NO LIVE INPUT",
+            "",
+            "",
+            "",
+            "",
+        ]
+    } else {
+        [
+            "ARROWS/A D  MOVE",
+            "UP/X, Z     ROTATE",
+            "DOWN/S      SOFT DROP",
+            "SPACE       HARD DROP",
+            "C/H         HOLD",
+            "P           PAUSE",
+            "ESC         PAUSE",
+        ]
+    }
     .iter()
     .enumerate()
     {
@@ -682,7 +881,7 @@ fn draw_game(
         ),
         _ => {}
     }
-    if matches!(snapshot.phase, Phase::GameOver | Phase::Complete) {
+    if !replay_playback && matches!(snapshot.phase, Phase::GameOver | Phase::Complete) {
         centered_text(
             view,
             "PRESS F5 TO SAVE REPLAY",
@@ -777,7 +976,13 @@ fn draw_piece(view: View, kind: Option<PieceKind>, origin_x: f32, origin_y: f32,
     }
 }
 
-fn draw_title(view: View, seed_control: &SeedControl, screen: TitleScreen, index: u8) {
+fn draw_title(
+    view: View,
+    seed_control: &SeedControl,
+    screen: TitleScreen,
+    index: u8,
+    replays: &[ReplayEntry],
+) {
     fragments(
         view,
         &[("TETRA|", WHITE), ("D", RED)],
@@ -804,8 +1009,44 @@ fn draw_title(view: View, seed_control: &SeedControl, screen: TitleScreen, index
             centered_text(view, "> MARATHON", 640.0, 480.0, 28.0, WHITE);
         }
         TitleScreen::Replay => {
-            centered_text(view, "REPLAY — COMING SOON", 640.0, 500.0, 28.0, WHITE);
-            centered_text(view, "ESC TO RETURN", 640.0, 550.0, 20.0, RED);
+            centered_text(view, "REPLAY", 640.0, 440.0, 28.0, RED);
+            if replays.is_empty() {
+                centered_text(view, "NO REPLAYS FOUND", 640.0, 500.0, 24.0, WHITE);
+            }
+            for (row, entry) in replays
+                .iter()
+                .skip(index.saturating_sub(3) as usize)
+                .take(7)
+                .enumerate()
+            {
+                let selected = index as usize == row + index.saturating_sub(3) as usize;
+                let detail = match &entry.replay {
+                    Ok(replay) => format!(
+                        "{}  SCORE {}  SEED {}  {}s",
+                        entry.name,
+                        replay.final_state.result.score,
+                        replay.initial_seed,
+                        replay.final_state.timeline_ticks / TICK_HZ as u64
+                    ),
+                    Err(error) => format!("{}  INVALID: {error}", entry.name),
+                };
+                text(
+                    view,
+                    &detail,
+                    300.0,
+                    480.0 + row as f32 * 28.0,
+                    16.0,
+                    if selected { WHITE } else { RED },
+                );
+            }
+            centered_text(
+                view,
+                "ENTER TO PLAY • ESC TO RETURN",
+                640.0,
+                690.0,
+                16.0,
+                RED,
+            );
         }
         TitleScreen::Config => {
             centered_text(view, "CONFIG — COMING SOON", 640.0, 500.0, 28.0, WHITE);
@@ -937,6 +1178,31 @@ fn save_replay(recorder: &ReplayRecorder, name: &str) -> String {
         Ok(()) => format!("REPLAY SAVED: {path}"),
         Err(error) => format!("REPLAY SAVE FAILED: {error}"),
     }
+}
+
+fn discover_replays() -> Vec<ReplayEntry> {
+    let mut entries = match fs::read_dir("replays") {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path
+                    .extension()
+                    .is_some_and(|extension| extension == "json"))
+                .then_some(path)
+            })
+            .filter_map(|path| {
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                let replay = fs::read_to_string(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|json| Replay::from_json(&json).map_err(|error| error.to_string()));
+                Some(ReplayEntry { name, replay })
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => vec![],
+    };
+    entries.sort_by(|left, right| right.name.cmp(&left.name));
+    entries
 }
 
 fn konami_code() -> Vec<KeyCode> {
