@@ -221,6 +221,7 @@ pub struct Game {
     hold_used: bool,
     left: bool,
     right: bool,
+    spawn_buffer: Option<i8>,
     soft: bool,
     horizontal: u32,
     resets: u8,
@@ -256,6 +257,7 @@ impl Game {
             hold_used: false,
             left: false,
             right: false,
+            spawn_buffer: None,
             soft: false,
             horizontal: 0,
             resets: 0,
@@ -335,6 +337,9 @@ impl Game {
         put(self.hold_used as u64);
         put(self.left as u64);
         put(self.right as u64);
+        put(self
+            .spawn_buffer
+            .map_or(0, |direction| (direction + 2) as u64));
         put(self.soft as u64);
         put(self.sim);
         put(self.active_time);
@@ -456,24 +461,42 @@ impl Game {
                 self.phase = Phase::Falling;
                 e.push(GameEvent::Resumed)
             }
-            Command::LeftRelease => self.left = false,
-            Command::RightRelease => self.right = false,
+            Command::LeftRelease => {
+                self.left = false;
+                if self.spawn_buffer == Some(-1) {
+                    self.spawn_buffer = None;
+                }
+            }
+            Command::RightRelease => {
+                self.right = false;
+                if self.spawn_buffer == Some(1) {
+                    self.spawn_buffer = None;
+                }
+            }
             Command::SoftDropRelease => {
                 if self.soft {
                     self.soft = false;
                     self.gravity = 0;
                 }
             }
-            _ if self.phase != Phase::Falling => {}
+            _ if !matches!(self.phase, Phase::Falling | Phase::Clearing) => {}
             Command::LeftPress => {
                 self.left = true;
                 self.horizontal = 0;
-                self.move_x(-1, e)
+                if self.phase == Phase::Clearing {
+                    self.spawn_buffer = Some(-1);
+                } else {
+                    self.move_x(-1, e)
+                }
             }
             Command::RightPress => {
                 self.right = true;
                 self.horizontal = 0;
-                self.move_x(1, e)
+                if self.phase == Phase::Clearing {
+                    self.spawn_buffer = Some(1);
+                } else {
+                    self.move_x(1, e)
+                }
             }
             Command::SoftDropPress => {
                 if !self.soft {
@@ -727,7 +750,18 @@ impl Game {
         if self.phase == Phase::GameOver {
             e.push(GameEvent::GameOver)
         } else {
-            e.push(GameEvent::Spawned { kind: k })
+            let buffered_move = self
+                .spawn_buffer
+                .take()
+                .filter(|&direction| match direction {
+                    -1 => self.left,
+                    1 => self.right,
+                    _ => false,
+                });
+            e.push(GameEvent::Spawned { kind: k });
+            if let Some(direction) = buffered_move {
+                self.move_x(direction, e);
+            }
         }
     }
     fn reset_lock(&mut self) {
@@ -780,6 +814,7 @@ impl Game {
     fn clear_input(&mut self) {
         self.left = false;
         self.right = false;
+        self.spawn_buffer = None;
         self.soft = false;
         self.horizontal = 0
     }
@@ -1083,5 +1118,35 @@ mod tests {
         a.step(&[Command::Start]).unwrap();
         b.step(&[Command::Start]).unwrap();
         assert_ne!(a.state_hash(), b.state_hash());
+    }
+    #[test]
+    fn horizontal_input_during_clear_moves_the_next_piece_on_spawn() {
+        let mut game = Game::new(7);
+        game.phase = Phase::Clearing;
+        let mut events = Vec::new();
+        game.command(Command::LeftPress, &mut events);
+        assert!(events.is_empty());
+        assert_eq!(game.spawn_buffer, Some(-1));
+
+        game.activate(PieceKind::T, &mut events);
+        assert_eq!(game.active.x, 2);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                GameEvent::Spawned { .. },
+                GameEvent::Moved { dx: -1, dy: 0 }
+            ]
+        ));
+    }
+    #[test]
+    fn releasing_buffered_horizontal_input_cancels_the_spawn_move() {
+        let mut game = Game::new(7);
+        game.phase = Phase::Clearing;
+        let mut events = Vec::new();
+        game.command(Command::RightPress, &mut events);
+        game.command(Command::RightRelease, &mut events);
+        game.activate(PieceKind::T, &mut events);
+        assert_eq!(game.active.x, 3);
+        assert!(matches!(events.as_slice(), [GameEvent::Spawned { .. }]));
     }
 }

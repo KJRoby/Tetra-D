@@ -17,6 +17,17 @@ cargo run -p tetrad-term
 
 ## Python and Pygame
 
+From the repository root on Windows, the quickest way to build/update and
+launch the frontend is:
+
+```powershell
+.\Run-Pygame.ps1
+```
+
+`Run-Pygame.cmd` is an equivalent double-click/Command Prompt launcher.
+`Update-Pygame.ps1` creates the local `.venv`, refreshes dependencies, and
+rebuilds the binding without launching the game.
+
 The Python bindings are built from `crates/tetrad-python` with Maturin and
 expose the `tetradynamo` module. They are the only game-state dependency of
 the Pygame frontend.
