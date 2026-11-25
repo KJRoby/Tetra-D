@@ -6,8 +6,8 @@ use pyo3::{
     types::{PyDict, PyList},
 };
 use tetradynamo_core::{
-    shape_cells, Clear, ClearNotice, Command, Game, GameEvent, GameSnapshot, PieceKind, Replay,
-    Spin,
+    shape_cells, Clear, ClearNotice, Command, Game, GameConfig, GameEvent, GameSnapshot, PieceKind,
+    Replay, Spin,
 };
 
 #[pyclass(name = "Game")]
@@ -58,11 +58,21 @@ impl PyReplay {
 #[pymethods]
 impl PyGame {
     #[new]
-    #[pyo3(signature = (seed = 0))]
-    fn new(seed: u64) -> Self {
-        Self {
-            game: Game::new(seed),
-        }
+    #[pyo3(signature = (seed = 0, mode = "marathon"))]
+    fn new(seed: u64, mode: &str) -> PyResult<Self> {
+        let config = match mode {
+            "marathon" => GameConfig::guideline_marathon(),
+            "sprint" => GameConfig::guideline_sprint(),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "unknown game mode; expected 'marathon' or 'sprint'",
+                ));
+            }
+        };
+        Ok(Self {
+            game: Game::try_with_config(seed, config)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
+        })
     }
 
     fn step(&mut self, py: Python<'_>, commands: Vec<String>) -> PyResult<Py<PyAny>> {

@@ -4,7 +4,7 @@
 
 - Deterministic Rust simulation at 1,000 Hz.
 - Guideline mechanics, seven-bag, SRS, hold, T-spins, scoring, combo/B2B, and
-  Marathon.
+  Marathon plus fixed-speed 40-line Sprint.
 - Ratatui terminal and PyO3/Pygame frontends sharing the same simulation.
 - Native Macroquad desktop frontend sharing the same simulation directly.
 - Configured Guideline/Marathon defaults and expanded deterministic state hash.
@@ -17,7 +17,7 @@
 
 ## Current limitations
 
-- Only Guideline and Marathon presets are implemented.
+- Only Guideline mechanics and the Marathon/Sprint mode presets are implemented.
 - Board dimensions are fixed at 10×22 with two hidden rows.
 - Replay seeking, speed controls, and non-Macroquad replay browsers do not yet
   exist.

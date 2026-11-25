@@ -25,6 +25,10 @@ Replay browser loads compatible files through `ReplayPlayer`, verifies each
 tick during playback, and keeps viewer pause separate from recorded pause
 commands.
 
+Replay configuration includes the complete game-mode variant. Macroquad uses
+the active mode identifier (`marathon` or `sprint`) as the default saved replay
+filename prefix.
+
 ## Fixtures and compatibility
 
 Fixtures live in `crates/tetradynamo-core/tests/fixtures` and are verified by

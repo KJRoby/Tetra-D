@@ -39,7 +39,7 @@ KEY_UP = {
 }
 PAUSE_OPTIONS = ("RESUME", "RESTART", "RETURN TO TITLE")
 TITLE_OPTIONS = ("SOLO", "REPLAY", "CONFIG")
-SOLO_OPTIONS = ("MARATHON",)
+SOLO_OPTIONS = ("MARATHON", "SPRINT")
 KONAMI = (pygame.K_UP, pygame.K_UP, pygame.K_DOWN, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_b, pygame.K_a)
 
 
@@ -154,6 +154,14 @@ def chain_number(combo):
     return combo - 1 if combo >= 2 else None
 
 
+def format_mode_time(ticks):
+    """Format deterministic mode time (1,000 ticks per second)."""
+    hours, remainder = divmod(ticks, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, milliseconds = divmod(remainder, 1_000)
+    return f"{hours:02}:{minutes:02}:{seconds:02}:{milliseconds // 10:02}"
+
+
 def clear_notice_fragments(notice):
     clear, points, spin, back_to_back = notice
     prefix = "B2B " if back_to_back else ""
@@ -166,7 +174,7 @@ def clear_notice_fragments(notice):
     return [(f"{prefix}{clear}  +{points}", WHITE)]
 
 
-def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed):
+def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed, mode):
     surface.fill(BLACK)
     tiny, normal, title_font = fonts
     board_x, board_y, cell = BOARD_X, BOARD_Y, CELL_SIZE
@@ -194,8 +202,8 @@ def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed):
             pygame.draw.rect(surface, RED, (board_x + x * cell, board_y + y * cell, cell - 2, cell - 2))
     for rect in (STATUS_PANEL, HOLD_PANEL, NEXT_PANEL, CONTROLS_PANEL):
         panel(surface, rect)
-    elapsed = snapshot["timers"]["active_gameplay_ticks"] // TICK_HZ
-    stats = [f"LINES   {snapshot['lines']}", f"LEVEL   {snapshot['level']}", f"SCORE   {snapshot['score']}", f"TIME    {elapsed // 60:02}:{elapsed % 60:02}", f"GRAVITY {snapshot['gravity_cps']} cells/s"]
+    elapsed = format_mode_time(snapshot["timers"]["mode_elapsed_ticks"])
+    stats = [f"LINES   {snapshot['lines']}", f"LEVEL   {snapshot['level']}", f"SCORE   {snapshot['score']}", f"TIME    {elapsed}", f"GRAVITY {snapshot['gravity_cps']} cells/s"]
     text(surface, normal, "STATUS", (STATUS_PANEL[0] + 30, 82))
     for index, value in enumerate(stats):
         text(surface, tiny, value, (STATUS_PANEL[0] + 30, 115 + index * 29))
@@ -223,7 +231,7 @@ def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed):
     for index, control in enumerate(controls):
         text(surface, tiny, control, (1010, 112 + index * 23))
     if show_seed:
-        text(surface, tiny, f"SEED {snapshot['seed']}", (24, 680), (0, 0, 255))
+        text(surface, tiny, f"SEED 0x{snapshot['seed']:X}", (24, 680), (0, 0, 255))
     phase = snapshot["phase"]
     if (countdown := countdown_label(snapshot)):
         text(surface, title_font if countdown == "GET READY" else normal, countdown, (WELL_CENTER_X, 350), WHITE, center=True)
@@ -233,7 +241,7 @@ def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed):
             color = WHITE if index == pause_index else RED
             text(surface, normal, option, (WELL_CENTER_X, 390 + index * 30), color, center=True)
     if phase in ("gameover", "complete"):
-        message = {"paused": "PAUSED", "gameover": "GAME OVER — R TO RESTART", "complete": "MARATHON COMPLETE — R TO RESTART"}[phase]
+        message = {"paused": "PAUSED", "gameover": "GAME OVER — R TO RESTART", "complete": f"{mode.upper()} COMPLETE — R TO RESTART"}[phase]
         text(surface, normal, message, (WELL_CENTER_X, 370), WHITE, center=True)
 
 
@@ -263,7 +271,8 @@ def main():
     pygame.display.set_caption("Tetra|D")
     logical = pygame.Surface(LOGICAL_SIZE)
     fonts = (pygame.font.SysFont("consolas", 20, bold=True), pygame.font.SysFont("consolas", 28, bold=True), pygame.font.SysFont("consolas", 54, bold=True))
-    game = Game(0x544554524144)
+    selected_mode = "marathon"
+    game = Game(0x544554524144, selected_mode)
     snapshot, pending = game.snapshot(), []
     pause_index, seed_locked, show_seed = 0, False, False
     title_screen, title_index = "root", 0
@@ -333,7 +342,10 @@ def main():
                             selected = TITLE_OPTIONS[title_index]
                             title_screen, title_index = ("solo", 0) if selected == "SOLO" else (selected.lower(), 0)
                         elif title_screen == "solo":
-                            apply(game.start_with_seed(snapshot["seed"] if seed_locked else random_seed()))
+                            selected_mode = SOLO_OPTIONS[title_index].lower()
+                            seed = snapshot["seed"] if seed_locked else random_seed()
+                            game = Game(seed, selected_mode)
+                            apply(game.start_with_seed(seed))
                 elif snapshot["phase"] == "paused":
                     if event.key == pygame.K_UP:
                         pause_index = (pause_index - 1) % len(PAUSE_OPTIONS)
@@ -364,13 +376,16 @@ def main():
                             selected = TITLE_OPTIONS[title_index]
                             title_screen, title_index = ("solo", 0) if selected == "SOLO" else (selected.lower(), 0)
                         elif title_screen == "solo":
-                            apply(game.start_with_seed(snapshot["seed"] if seed_locked else random_seed()))
+                            selected_mode = SOLO_OPTIONS[title_index].lower()
+                            seed = snapshot["seed"] if seed_locked else random_seed()
+                            game = Game(seed, selected_mode)
+                            apply(game.start_with_seed(seed))
         while accumulator >= 1 / TICK_HZ:
             result = game.step(pending); pending = []; snapshot = result["snapshot"]
             if any(event["type"] == "level_changed" for event in result["events"]): flash = 500
             flash = max(0, flash - 1); accumulator -= 1 / TICK_HZ
         if snapshot["phase"] == "title": draw_title(logical, fonts, seed_prompt, seed_text, seed_error, title_screen, title_index)
-        else: draw_game(logical, snapshot, fonts, flash, pause_index, show_seed)
+        else: draw_game(logical, snapshot, fonts, flash, pause_index, show_seed, selected_mode)
         width, height = window.get_size(); scale = min(width / LOGICAL_SIZE[0], height / LOGICAL_SIZE[1])
         scaled = pygame.transform.smoothscale(logical, (int(LOGICAL_SIZE[0] * scale), int(LOGICAL_SIZE[1] * scale)))
         window.fill(BLACK); window.blit(scaled, ((width - scaled.get_width()) // 2, (height - scaled.get_height()) // 2)); pygame.display.flip()

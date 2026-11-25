@@ -18,6 +18,12 @@ effects. They must keep authoritative gameplay in Dynamo Core.
 - Frontends choose session seeds outside the core and call
   `start_with_seed`/`restart_with_seed`; a chosen seed is part of the read-only
   snapshot and can be displayed for replay/debugging.
+- Build sessions from a selected `GameConfig`; the shipped Solo choices are
+  Guideline Marathon and 40-line fixed-speed Guideline Sprint. Restart must
+  preserve the active configuration.
+- Display elapsed mode time from `Timers::mode_elapsed_ticks` as
+  `HH:MM:SS:cc`. This includes falling and clear-delay time but excludes
+  ready/countdown and paused phases.
 - A recording frontend must own the simulation through `ReplayRecorder` and
   submit only core command batches/lifecycle actions. Do not record physical
   key events, rendering time, or derived gameplay outcomes.

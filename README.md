@@ -4,6 +4,7 @@ Tetra|D is an early-alpha deterministic falling-block game with a reusable Rust
 simulation core plus Ratatui/Crossterm, Pygame, and Macroquad frontends.
 
 The core defaults to the Guideline mechanical ruleset and Marathon game mode.
+Solo Sprint is also available: clear 40 lines at fixed level-1 speed.
 See the [architecture](docs/ARCHITECTURE.md), [core API](docs/CORE_API.md),
 [rulesets](docs/RULESETS.md), [game modes](docs/GAME_MODES.md),
 [determinism](docs/DETERMINISM.md), [frontend guide](docs/FRONTEND_GUIDE.md),
@@ -77,16 +78,20 @@ NEXT previews to the right, and controls in the lower-right corner.
 | Up/Down, Enter/Space | Pause-menu selection |
 | R | Restart after game over or completion |
 
-After starting Marathon, the core presents a 1.5-second **GET READY** stage and
+After starting a Solo mode, the core presents a 1.5-second **GET READY** stage and
 a three-second countdown. Pausing hides the well visually; resuming uses the
 same three-second countdown. Enter the standard Konami sequence
 (`Up Up Down Down Left Right Left Right B A`) on the title screen to choose a
 decimal or `0x` hexadecimal seed. Enter it while paused to toggle a visible,
 locked seed for reproducible restarts.
+Displayed seeds use hexadecimal notation; seed entry accepts hexadecimal or decimal.
 
 Terminal key-release support is not portable. Directional input is therefore
 implemented as press/repeat movement, which remains reliable in Windows
 Terminal, macOS Terminal, and common Linux terminals.
+
+All frontends display mode time as `HH:MM:SS:cc`. It includes falling and
+line-clear delay time while excluding ready/countdowns and pauses.
 
 ## License and attribution
 

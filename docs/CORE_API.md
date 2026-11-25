@@ -7,6 +7,9 @@
 with explicit rules and mode configuration.
 
 `GameConfig::guideline_marathon()` is the default composition.
+`GameConfig::guideline_sprint()` combines the same Guideline mechanics with a
+40-line fixed-level Sprint objective. `GameModeConfig::id()` supplies stable
+`"marathon"` and `"sprint"` identifiers for presentation and replay names.
 
 `start_with_seed(seed)` begins a new session in `Ready` with an explicit seed.
 `restart_with_seed(seed)` does the same while emitting a restart event, and
@@ -37,7 +40,8 @@ same deterministic tick as their transitions.
 
 The existing `Game::new`, `step`, `snapshot`, `restart`, `state_hash`, command,
 event, and snapshot contracts remain supported. Python retains its existing
-default `Game(seed=0)` constructor and string command API.
+default `Game(seed=0)` constructor and string command API; it additionally
+accepts `Game(seed=0, mode="sprint")`.
 
 ## Replay
 

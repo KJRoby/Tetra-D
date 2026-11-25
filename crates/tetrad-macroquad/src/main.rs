@@ -84,6 +84,8 @@ struct SeedControl {
 struct SaveOverlay<'a> {
     prompt: bool,
     name: &'a str,
+    default_name: &'a str,
+    mode_name: &'a str,
     message: Option<&'a str>,
 }
 
@@ -163,7 +165,7 @@ fn reconcile_key(
 
 #[macroquad::main(window_conf)]
 async fn main() {
-    let mut game = new_recording(0x5445_5452_4144);
+    let mut game = new_recording(0x5445_5452_4144, GameConfig::default());
     let mut snapshot = game.snapshot();
     let mut held = HeldInput::default();
     let mut pending = Vec::new();
@@ -248,6 +250,8 @@ async fn main() {
                 SaveOverlay {
                     prompt: false,
                     name: "",
+                    default_name: active.replay.config.mode.id(),
+                    mode_name: active.replay.config.mode.id(),
                     message: None,
                 },
                 true,
@@ -298,7 +302,7 @@ async fn main() {
                 save_name.pop();
             } else if is_key_pressed(KeyCode::Enter) {
                 let name = if save_name.is_empty() {
-                    "marathon"
+                    game.game().config().mode.id()
                 } else {
                     &save_name
                 };
@@ -352,7 +356,7 @@ async fn main() {
             let count = if title_screen == TitleScreen::Root {
                 3
             } else if title_screen == TitleScreen::Solo {
-                1
+                2
             } else if title_screen == TitleScreen::Replay {
                 replay_entries.len().min(u8::MAX as usize) as u8
             } else {
@@ -384,7 +388,7 @@ async fn main() {
                         } else {
                             random_seed()
                         };
-                        game = new_recording(seed);
+                        game = new_recording(seed, solo_config(title_index));
                         snapshot = game.start_with_seed(seed).snapshot;
                     }
                     TitleScreen::Replay => {
@@ -429,7 +433,7 @@ async fn main() {
             } else {
                 random_seed()
             };
-            game = new_recording(seed);
+            game = new_recording(seed, game.game().config().clone());
             snapshot = game.start_with_seed(seed).snapshot;
         }
         if pending.contains(&Command::ReturnToTitle) {
@@ -437,6 +441,8 @@ async fn main() {
             // be applied immediately rather than waiting for another tick.
             pending.clear();
             snapshot = game.return_to_title().snapshot;
+            title_screen = TitleScreen::Root;
+            title_index = 0;
         }
         if snapshot.phase == Phase::Paused {
             let view = View::current();
@@ -454,7 +460,7 @@ async fn main() {
                             } else {
                                 random_seed()
                             };
-                            game = new_recording(seed);
+                            game = new_recording(seed, game.game().config().clone());
                             snapshot = game.start_with_seed(seed).snapshot;
                         }
                         _ => snapshot = game.return_to_title().snapshot,
@@ -468,7 +474,7 @@ async fn main() {
             let count = if title_screen == TitleScreen::Root {
                 3
             } else if title_screen == TitleScreen::Solo {
-                1
+                2
             } else if title_screen == TitleScreen::Replay {
                 replay_entries.len().min(u8::MAX as usize) as u8
             } else {
@@ -495,7 +501,7 @@ async fn main() {
                             } else {
                                 random_seed()
                             };
-                            game = new_recording(seed);
+                            game = new_recording(seed, solo_config(title_index));
                             snapshot = game.start_with_seed(seed).snapshot;
                         }
                         TitleScreen::Replay => {
@@ -568,6 +574,8 @@ async fn main() {
                 SaveOverlay {
                     prompt: save_prompt,
                     name: &save_name,
+                    default_name: game.game().config().mode.id(),
+                    mode_name: game.game().config().mode.id(),
                     message: save_message
                         .as_ref()
                         .filter(|(_, since)| get_time() - *since < 3.0)
@@ -586,6 +594,15 @@ fn queue_actions(
     pending: &mut Vec<Command>,
     pause_index: &mut u8,
 ) {
+    if matches!(snapshot.phase, Phase::GameOver | Phase::Complete) {
+        if is_key_pressed(KeyCode::Escape) {
+            pending.push(Command::ReturnToTitle);
+        }
+        if is_key_pressed(KeyCode::R) {
+            pending.push(Command::Restart);
+        }
+        return;
+    }
     if snapshot.phase == Phase::Paused {
         if is_key_pressed(KeyCode::Up) {
             *pause_index = (*pause_index + 2) % 3;
@@ -749,13 +766,13 @@ fn draw_game(
         outline(view, panel.0, panel.1, panel.2, panel.3, 2.0, RED);
     }
 
-    let elapsed = snapshot.timers.active_gameplay_ticks / TICK_HZ as u64;
+    let elapsed = format_mode_time(snapshot.timers.mode_elapsed_ticks);
     text(view, "STATUS", STATUS_X + 30.0, 82.0, 28.0, RED);
     for (index, value) in [
         format!("LINES   {}", snapshot.lines),
         format!("LEVEL   {}", snapshot.level),
         format!("SCORE   {}", snapshot.score),
-        format!("TIME    {:02}:{:02}", elapsed / 60, elapsed % 60),
+        format!("TIME    {elapsed}"),
         format!("GRAVITY {} cells/s", snapshot.gravity_cps),
     ]
     .iter()
@@ -800,7 +817,7 @@ fn draw_game(
     if show_seed {
         text(
             view,
-            &format!("SEED {}", snapshot.seed),
+            &format!("SEED 0x{:X}", snapshot.seed),
             24.0,
             680.0,
             20.0,
@@ -863,7 +880,7 @@ fn draw_game(
                 );
             }
         }
-        Phase::GameOver => centered_text(
+        Phase::GameOver if !replay_playback => centered_text(
             view,
             "GAME OVER — R TO RESTART",
             WELL_CENTER_X,
@@ -871,9 +888,9 @@ fn draw_game(
             28.0,
             WHITE,
         ),
-        Phase::Complete => centered_text(
+        Phase::Complete if !replay_playback => centered_text(
             view,
-            "MARATHON COMPLETE — R TO RESTART",
+            &format!("{} COMPLETE — R TO RESTART", save.mode_name.to_uppercase()),
             WELL_CENTER_X,
             350.0,
             28.0,
@@ -881,12 +898,23 @@ fn draw_game(
         ),
         _ => {}
     }
-    if !replay_playback && matches!(snapshot.phase, Phase::GameOver | Phase::Complete) {
+    if !replay_playback
+        && !save.prompt
+        && matches!(snapshot.phase, Phase::GameOver | Phase::Complete)
+    {
         centered_text(
             view,
             "PRESS F5 TO SAVE REPLAY",
             WELL_CENTER_X,
             390.0,
+            20.0,
+            WHITE,
+        );
+        centered_text(
+            view,
+            "PRESS ESC TO RETURN TO TITLE",
+            WELL_CENTER_X,
+            420.0,
             20.0,
             WHITE,
         );
@@ -896,7 +924,7 @@ fn draw_game(
         centered_text(
             view,
             if save.name.is_empty() {
-                "marathon"
+                save.default_name
             } else {
                 save.name
             },
@@ -1006,7 +1034,16 @@ fn draw_title(
         }
         TitleScreen::Solo => {
             centered_text(view, "SOLO", 640.0, 440.0, 28.0, RED);
-            centered_text(view, "> MARATHON", 640.0, 480.0, 28.0, WHITE);
+            for (i, value) in ["MARATHON", "SPRINT"].iter().enumerate() {
+                centered_text(
+                    view,
+                    &format!("{}{}", if index == i as u8 { "> " } else { "" }, value),
+                    640.0,
+                    480.0 + i as f32 * 40.0,
+                    28.0,
+                    if index == i as u8 { WHITE } else { RED },
+                );
+            }
         }
         TitleScreen::Replay => {
             centered_text(view, "REPLAY", 640.0, 440.0, 28.0, RED);
@@ -1022,7 +1059,7 @@ fn draw_title(
                 let selected = index as usize == row + index.saturating_sub(3) as usize;
                 let detail = match &entry.replay {
                     Ok(replay) => format!(
-                        "{}  SCORE {}  SEED {}  {}s",
+                        "{}  SCORE {}  SEED 0x{:X}  {}s",
                         entry.name,
                         replay.final_state.result.score,
                         replay.initial_seed,
@@ -1159,8 +1196,24 @@ fn save_name_character_allowed(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
 }
 
-fn new_recording(seed: u64) -> ReplayRecorder {
-    ReplayRecorder::new(seed, GameConfig::default()).expect("default replay configuration is valid")
+fn solo_config(index: u8) -> GameConfig {
+    match index {
+        0 => GameConfig::guideline_marathon(),
+        1 => GameConfig::guideline_sprint(),
+        _ => GameConfig::guideline_marathon(),
+    }
+}
+
+fn new_recording(seed: u64, config: GameConfig) -> ReplayRecorder {
+    ReplayRecorder::new(seed, config).expect("frontend game configuration is valid")
+}
+
+fn format_mode_time(ticks: u64) -> String {
+    let hours = ticks / 3_600_000;
+    let minutes = (ticks / 60_000) % 60;
+    let seconds = (ticks / 1_000) % 60;
+    let centiseconds = (ticks / 10) % 100;
+    format!("{hours:02}:{minutes:02}:{seconds:02}:{centiseconds:02}")
 }
 
 fn save_replay(recorder: &ReplayRecorder, name: &str) -> String {
@@ -1326,5 +1379,12 @@ mod tests {
     fn well_layout_is_horizontally_centered() {
         assert_eq!(BOARD_X, (LOGICAL_WIDTH - BOARD_WIDTH) / 2.0);
         assert_eq!(WELL_CENTER_X, LOGICAL_WIDTH / 2.0);
+    }
+
+    #[test]
+    fn mode_time_has_hour_and_centisecond_precision() {
+        assert_eq!(format_mode_time(0), "00:00:00:00");
+        assert_eq!(format_mode_time(12_345), "00:00:12:34");
+        assert_eq!(format_mode_time(3_661_999), "01:01:01:99");
     }
 }

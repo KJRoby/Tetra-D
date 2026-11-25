@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tetradynamo_core::{
-    shape_cells, Board, Command, Game, Phase, PieceKind, HEIGHT, HIDDEN_ROWS, WIDTH,
+    shape_cells, Board, Command, Game, GameConfig, Phase, PieceKind, HEIGHT, HIDDEN_ROWS, WIDTH,
 };
 
 const RED: Color = Color::Rgb(255, 0, 0);
@@ -46,6 +46,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
     let mut acc = Duration::ZERO;
     let mut pending_commands = Vec::new();
     let mut pause_index = 0_u8;
+    let mut title_index = 0_u8;
     let mut seed_control = SeedControl::default();
     let mut level_flash_ticks = 0_u32;
     loop {
@@ -85,6 +86,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                                 seed_control.show = true;
                                 seed_control.prompt = false;
                                 seed_control.error = false;
+                                game = Game::with_config(seed, title_config(title_index));
                                 game.start_with_seed(seed);
                             }
                             None => seed_control.error = true,
@@ -114,13 +116,19 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                     continue;
                 }
                 if game.phase == Phase::Title && k.kind != KeyEventKind::Release {
-                    if k.code == KeyCode::Enter {
-                        let seed = if seed_control.locked {
-                            game.snapshot().seed
-                        } else {
-                            random_seed()
-                        };
-                        game.start_with_seed(seed);
+                    match k.code {
+                        KeyCode::Up => title_index = (title_index + 1) % 2,
+                        KeyCode::Down => title_index = (title_index + 1) % 2,
+                        KeyCode::Enter | KeyCode::Char(' ') => {
+                            let seed = if seed_control.locked {
+                                game.snapshot().seed
+                            } else {
+                                random_seed()
+                            };
+                            game = Game::with_config(seed, title_config(title_index));
+                            game.start_with_seed(seed);
+                        }
+                        _ => {}
                     }
                     continue;
                 }
@@ -183,6 +191,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                 level_flash_ticks,
                 pause_index,
                 &seed_control,
+                title_index,
             )
         })?;
         std::thread::sleep(Duration::from_millis(8));
@@ -284,13 +293,14 @@ fn draw(
     level_flash_ticks: u32,
     pause_index: u8,
     seed_control: &SeedControl,
+    title_index: u8,
 ) {
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Black)),
         area,
     );
     if g.phase == Phase::Title {
-        title(area, f, seed_control);
+        title(area, f, seed_control, title_index);
         return;
     }
     let cols = Layout::default()
@@ -312,12 +322,11 @@ fn draw(
         height: 22.min(mid.height.saturating_sub(1)),
     };
     let stats = format!(
-        "LINES   {}\nLEVEL   {}\nSCORE   {}\nTIME    {:02}:{:02}\nGRAVITY {} cells/s",
+        "LINES   {}\nLEVEL   {}\nSCORE   {}\nTIME    {}\nGRAVITY {} cells/s",
         g.lines,
         g.level,
         g.score,
-        g.snapshot().timers.active_gameplay_ticks / 60_000,
-        (g.snapshot().timers.active_gameplay_ticks / 1_000) % 60,
+        format_mode_time(g.snapshot().timers.mode_elapsed_ticks),
         g.gravity_cps()
     );
     box_text(f, left, "STATUS", stats);
@@ -378,7 +387,8 @@ fn draw(
     }
     if seed_control.show {
         f.render_widget(
-            Paragraph::new(format!("SEED {}", g.snapshot().seed)).style(Style::default().fg(BLUE)),
+            Paragraph::new(format!("SEED 0x{:X}", g.snapshot().seed))
+                .style(Style::default().fg(BLUE)),
             Rect {
                 x: area.x + 1,
                 y: area.bottom().saturating_sub(1),
@@ -425,7 +435,13 @@ fn draw(
         let t = match g.phase {
             Phase::Paused => "PAUSED",
             Phase::GameOver => "GAME OVER — R TO RESTART",
-            Phase::Complete => "MARATHON COMPLETE — R TO RESTART",
+            Phase::Complete => {
+                if g.config().mode.id() == "sprint" {
+                    "SPRINT COMPLETE — R TO RESTART"
+                } else {
+                    "MARATHON COMPLETE — R TO RESTART"
+                }
+            }
             Phase::Ready => "GET READY",
             Phase::StartCountdown | Phase::ResumeCountdown => {
                 let remaining = g.snapshot().timers.phase_remaining_ticks;
@@ -485,7 +501,7 @@ fn level_flash_visible(remaining: u32) -> bool {
     elapsed < 125 || (250..375).contains(&elapsed)
 }
 
-fn title(area: Rect, f: &mut ratatui::Frame, seed_control: &SeedControl) {
+fn title(area: Rect, f: &mut ratatui::Frame, seed_control: &SeedControl, title_index: u8) {
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -504,8 +520,24 @@ fn title(area: Rect, f: &mut ratatui::Frame, seed_control: &SeedControl) {
         Line::from(""),
         Line::from(Span::styled("GAME MODE:", Style::default().fg(RED))),
         Line::from(Span::styled(
-            "> MARATHON",
-            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+            if title_index == 0 {
+                "> MARATHON"
+            } else {
+                "  MARATHON"
+            },
+            Style::default()
+                .fg(if title_index == 0 { Color::White } else { RED })
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            if title_index == 1 {
+                "> SPRINT"
+            } else {
+                "  SPRINT"
+            },
+            Style::default()
+                .fg(if title_index == 1 { Color::White } else { RED })
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -550,6 +582,22 @@ fn title(area: Rect, f: &mut ratatui::Frame, seed_control: &SeedControl) {
             height: area.height * 3 / 5,
         },
     );
+}
+
+fn title_config(index: u8) -> GameConfig {
+    if index == 1 {
+        GameConfig::guideline_sprint()
+    } else {
+        GameConfig::guideline_marathon()
+    }
+}
+
+fn format_mode_time(ticks: u64) -> String {
+    let hours = ticks / 3_600_000;
+    let minutes = (ticks / 60_000) % 60;
+    let seconds = (ticks / 1_000) % 60;
+    let centiseconds = (ticks / 10) % 100;
+    format!("{hours:02}:{minutes:02}:{seconds:02}:{centiseconds:02}")
 }
 fn box_text(f: &mut ratatui::Frame, r: Rect, title: &str, text: String) {
     f.render_widget(
@@ -651,7 +699,13 @@ mod tests {
         let mut game = Game::new(7);
         game.step(&[Command::Start]).unwrap();
         terminal
-            .draw(|frame| draw(frame.area(), frame, &game, 0, 0, &SeedControl::default()))
+            .draw(|frame| draw(frame.area(), frame, &game, 0, 0, &SeedControl::default(), 0))
             .unwrap();
+    }
+
+    #[test]
+    fn mode_time_has_hour_and_centisecond_precision() {
+        assert_eq!(format_mode_time(0), "00:00:00:00");
+        assert_eq!(format_mode_time(3_661_999), "01:01:01:99");
     }
 }

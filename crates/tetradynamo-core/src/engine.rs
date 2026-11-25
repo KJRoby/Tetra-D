@@ -285,6 +285,7 @@ impl Game {
             horizontal: 0,
             resets: 0,
         };
+        g.level = g.config.mode.level_for_lines(0);
         g.fill();
         g.active = piece(g.take());
         Ok(g)
@@ -411,10 +412,21 @@ impl Game {
         put(rules.spins.detect_t_spins as u64);
         put(rules.scoring.back_to_back_multiplier_numerator as u64);
         put(rules.scoring.back_to_back_multiplier_denominator as u64);
-        let mode = self.config.mode.marathon_config();
-        put(mode.target_lines as u64);
-        put(mode.lines_per_level as u64);
-        put(mode.maximum_level as u64);
+        // Keep Marathon's v1 hash sequence unchanged so existing fixtures and
+        // recorded Marathon replays remain verifiable. Sprint contributes a
+        // distinct marker plus all of its authoritative settings.
+        match self.config.mode {
+            crate::GameModeConfig::Marathon(mode) => {
+                put(mode.target_lines as u64);
+                put(mode.lines_per_level as u64);
+                put(mode.maximum_level as u64);
+            }
+            crate::GameModeConfig::Sprint(mode) => {
+                put(u64::MAX);
+                put(mode.target_lines as u64);
+                put(mode.fixed_level as u64);
+            }
+        }
         put(s.active.kind.id() as u64);
         put(s.active.rotation as u64);
         put(s.active.x as u64);
@@ -642,8 +654,7 @@ impl Game {
             self.pending.clear();
             self.lines += n;
             let old = self.level;
-            let mode = self.config.mode.marathon_config();
-            self.level = (1 + self.lines / mode.lines_per_level).min(mode.maximum_level);
+            self.level = self.config.mode.level_for_lines(self.lines);
             if old != self.level {
                 e.push(GameEvent::LevelChanged {
                     from: old,
@@ -834,7 +845,7 @@ impl Game {
         }
     }
     fn activate(&mut self, k: PieceKind, e: &mut Vec<GameEvent>) {
-        if self.lines >= self.config.mode.marathon_config().target_lines {
+        if self.lines >= self.config.mode.target_lines() {
             self.phase = Phase::Complete;
             e.push(GameEvent::Completed);
             return;
@@ -1266,5 +1277,26 @@ mod tests {
         game.activate(PieceKind::T, &mut events);
         assert_eq!(game.active.x, 3);
         assert!(matches!(events.as_slice(), [GameEvent::Spawned { .. }]));
+    }
+
+    #[test]
+    fn sprint_completes_at_40_lines_without_level_progression() {
+        let mut game = Game::with_config(7, GameConfig::guideline_sprint());
+        game.phase = Phase::Clearing;
+        game.lines = 39;
+        game.level = 1;
+        game.pending = vec![(HEIGHT - 1) as usize];
+        game.clear = game.config.rules.timing.clear_delay_ticks - 1;
+
+        let mut events = Vec::new();
+        game.clearing(&mut events);
+
+        assert_eq!(game.lines, 40);
+        assert_eq!(game.level, 1);
+        assert_eq!(game.phase, Phase::Complete);
+        assert!(events.contains(&GameEvent::Completed));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LevelChanged { .. })));
     }
 }
