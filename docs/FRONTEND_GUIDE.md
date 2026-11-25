@@ -29,3 +29,5 @@ effects. They must keep authoritative gameplay in Dynamo Core.
   key events, rendering time, or derived gameplay outcomes.
 - Playback frontends must advance `ReplayPlayer` only; viewer pause must freeze
   presentation without submitting commands to the recorded simulation.
+- Pygame uses the Python `ReplayRecorder` and `ReplayPlayer` bindings for the
+  same replay format used by Macroquad.

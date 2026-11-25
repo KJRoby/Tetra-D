@@ -7,7 +7,7 @@ use pyo3::{
 };
 use tetradynamo_core::{
     shape_cells, Clear, ClearNotice, Command, Game, GameConfig, GameEvent, GameSnapshot, PieceKind,
-    Replay, Spin,
+    Replay, ReplayPlayer, ReplayRecorder, Spin, StepResult,
 };
 
 #[pyclass(name = "Game")]
@@ -20,8 +20,114 @@ struct PyReplay {
     replay: Replay,
 }
 
+#[pyclass(name = "ReplayRecorder")]
+struct PyRecorder {
+    recorder: ReplayRecorder,
+}
+
+#[pyclass(name = "ReplayPlayer")]
+struct PyPlayer {
+    player: ReplayPlayer,
+}
+
+fn result_to_py(py: Python<'_>, result: &StepResult) -> PyResult<Py<PyAny>> {
+    let output = PyDict::new(py);
+    output.set_item("events", events_to_py(py, &result.events))?;
+    output.set_item("snapshot", snapshot_to_py(py, &result.snapshot)?)?;
+    Ok(output.into_any().unbind())
+}
+
+#[pymethods]
+impl PyRecorder {
+    #[new]
+    #[pyo3(signature = (seed = 0, mode = "marathon"))]
+    fn new(seed: u64, mode: &str) -> PyResult<Self> {
+        let config = match mode {
+            "marathon" => GameConfig::guideline_marathon(),
+            "sprint" => GameConfig::guideline_sprint(),
+            _ => return Err(PyValueError::new_err("unknown game mode")),
+        };
+        Ok(Self {
+            recorder: ReplayRecorder::new(seed, config)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+        })
+    }
+    fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(snapshot_to_py(py, &self.recorder.snapshot())?
+            .into_any()
+            .unbind())
+    }
+    fn step(&mut self, py: Python<'_>, commands: Vec<String>) -> PyResult<Py<PyAny>> {
+        let commands = commands
+            .iter()
+            .map(|c| parse_command(c))
+            .collect::<PyResult<Vec<_>>>()?;
+        let result = self
+            .recorder
+            .step(&commands)
+            .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+        result_to_py(py, &result)
+    }
+    fn start_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<Py<PyAny>> {
+        result_to_py(py, &self.recorder.start_with_seed(seed))
+    }
+    fn restart_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<Py<PyAny>> {
+        result_to_py(py, &self.recorder.restart_with_seed(seed))
+    }
+    fn return_to_title(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        result_to_py(py, &self.recorder.return_to_title())
+    }
+    fn replay(&self) -> PyReplay {
+        PyReplay {
+            replay: self.recorder.replay(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyPlayer {
+    fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(snapshot_to_py(py, &self.player.game().snapshot())?
+            .into_any()
+            .unbind())
+    }
+    fn advance(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.player
+            .advance()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .map(|r| result_to_py(py, &r))
+            .transpose()
+    }
+    fn finish(&mut self) -> PyResult<u64> {
+        self.player
+            .finish()
+            .map(|v| v.final_state_hash)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}
+
 #[pymethods]
 impl PyReplay {
+    fn player(&self) -> PyResult<PyPlayer> {
+        Ok(PyPlayer {
+            player: self
+                .replay
+                .player()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+        })
+    }
+    fn metadata(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let output = PyDict::new(py);
+        output.set_item("mode", self.replay.config.mode.id())?;
+        output.set_item("seed", self.replay.initial_seed)?;
+        output.set_item("ticks", self.replay.final_state.timeline_ticks)?;
+        output.set_item("score", self.replay.final_state.result.score)?;
+        output.set_item(
+            "phase",
+            format!("{:?}", self.replay.final_state.result.phase).to_lowercase(),
+        )?;
+        Ok(output.into_any().unbind())
+    }
     #[staticmethod]
     fn from_json(value: &str) -> PyResult<Self> {
         Replay::from_json(value)
@@ -130,6 +236,8 @@ impl PyGame {
 fn tetradynamo(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyGame>()?;
     module.add_class::<PyReplay>()?;
+    module.add_class::<PyRecorder>()?;
+    module.add_class::<PyPlayer>()?;
     module.add("TICK_HZ", tetradynamo_core::TICK_HZ)?;
     module.add(
         "COMMANDS",

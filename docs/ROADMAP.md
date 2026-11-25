@@ -19,8 +19,7 @@
 
 - Only Guideline mechanics and the Marathon/Sprint mode presets are implemented.
 - Board dimensions are fixed at 10×22 with two hidden rows.
-- Replay seeking, speed controls, and non-Macroquad replay browsers do not yet
-  exist.
+- Replay seeking, speed controls, and a terminal replay browser do not yet exist.
 - Several engine concepts remain implementation-private pending the next module
   extraction milestone.
 

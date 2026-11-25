@@ -1,6 +1,7 @@
 //! Native Macroquad frontend. Dynamo Core remains the sole gameplay authority.
 
 use macroquad::prelude::*;
+use std::cell::RefCell;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, mem};
 use tetradynamo_core::{
@@ -25,6 +26,23 @@ const WHITE: Color = Color::new(1.0, 1.0, 1.0, 1.0);
 const BLUE: Color = Color::new(0.0, 0.0, 1.0, 1.0);
 const DIM_RED: Color = Color::new(0.22, 0.0, 0.0, 1.0);
 const GHOST_RED: Color = Color::new(0.39, 0.0, 0.0, 1.0);
+
+thread_local! {
+    static UI_FONT: RefCell<Option<Font>> = const { RefCell::new(None) };
+}
+
+fn load_ui_font() {
+    if let Some(windows) = std::env::var_os("WINDIR") {
+        let path = std::path::PathBuf::from(windows)
+            .join("Fonts")
+            .join("consolab.ttf");
+        if let Ok(bytes) = fs::read(path) {
+            if let Ok(font) = load_ttf_font_from_bytes(&bytes) {
+                UI_FONT.with(|slot| *slot.borrow_mut() = Some(font));
+            }
+        }
+    }
+}
 
 fn window_conf() -> Conf {
     Conf {
@@ -165,6 +183,7 @@ fn reconcile_key(
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    load_ui_font();
     let mut game = new_recording(0x5445_5452_4144, GameConfig::default());
     let mut snapshot = game.snapshot();
     let mut held = HeldInput::default();
@@ -180,6 +199,7 @@ async fn main() {
     let mut title_index = 0_u8;
     let mut replay_entries = Vec::new();
     let mut playback: Option<Playback> = None;
+    let mut replay_pause_index = 0_u8;
 
     loop {
         if let Some(active) = playback.as_mut() {
@@ -207,7 +227,34 @@ async fn main() {
                 }
             } else if is_key_pressed(KeyCode::P) || is_key_pressed(KeyCode::Escape) {
                 active.paused = !active.paused;
+                replay_pause_index = 0;
                 accumulator = 0.0;
+            }
+            if active.paused && !active.ended {
+                if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::Down) {
+                    replay_pause_index = 1 - replay_pause_index;
+                }
+                let (x, y) = View::current().logical(mouse_position().0, mouse_position().1);
+                let hovered = ((WELL_CENTER_X - 120.0)..=(WELL_CENTER_X + 120.0)).contains(&x)
+                    && (390.0..450.0).contains(&y);
+                if hovered {
+                    replay_pause_index = ((y - 390.0) / 30.0) as u8;
+                }
+                if is_key_pressed(KeyCode::Enter)
+                    || is_key_pressed(KeyCode::Space)
+                    || (hovered && is_mouse_button_pressed(MouseButton::Left))
+                {
+                    if replay_pause_index == 0 {
+                        active.paused = false;
+                        accumulator = 0.0;
+                    } else {
+                        playback = None;
+                        title_screen = TitleScreen::Root;
+                        title_index = 0;
+                        accumulator = 0.0;
+                        continue;
+                    }
+                }
             }
             if !active.paused && !active.ended {
                 accumulator += get_frame_time().min(0.25);
@@ -265,7 +312,20 @@ async fn main() {
                     28.0,
                     WHITE,
                 );
-                centered_text(View::current(), "RESUME", WELL_CENTER_X, 390.0, 28.0, WHITE);
+                for (index, option) in ["RESUME", "RETURN TO TITLE"].iter().enumerate() {
+                    centered_text(
+                        View::current(),
+                        option,
+                        WELL_CENTER_X,
+                        390.0 + index as f32 * 30.0,
+                        28.0,
+                        if replay_pause_index == index as u8 {
+                            WHITE
+                        } else {
+                            RED
+                        },
+                    );
+                }
             }
             if active.ended {
                 centered_text(
@@ -662,23 +722,41 @@ fn outline(view: View, x: f32, y: f32, width: f32, height: f32, thickness: f32, 
 
 fn text(view: View, value: &str, x: f32, y: f32, size: f32, color: Color) {
     let (x, y) = view.point(x, y + size);
-    draw_text(value, x, y, size * view.scale, color);
+    UI_FONT.with(|slot| {
+        let font = slot.borrow();
+        draw_text_ex(
+            value,
+            x,
+            y,
+            TextParams {
+                font: font.as_ref(),
+                font_size: size as u16,
+                font_scale: view.scale,
+                color,
+                ..Default::default()
+            },
+        );
+    });
+}
+
+fn text_width(value: &str, size: f32) -> f32 {
+    UI_FONT.with(|slot| measure_text(value, slot.borrow().as_ref(), size as u16, 1.0).width)
 }
 
 fn centered_text(view: View, value: &str, x: f32, y: f32, size: f32, color: Color) {
-    let width = measure_text(value, None, size as u16, 1.0).width;
+    let width = text_width(value, size);
     text(view, value, x - width / 2.0, y, size, color);
 }
 
 fn fragments(view: View, values: &[(&str, Color)], x: f32, y: f32, size: f32, center: bool) {
     let width: f32 = values
         .iter()
-        .map(|(value, _)| measure_text(value, None, size as u16, 1.0).width)
+        .map(|(value, _)| text_width(value, size))
         .sum();
     let mut x = if center { x - width / 2.0 } else { x };
     for (value, color) in values {
         text(view, value, x, y, size, *color);
-        x += measure_text(value, None, size as u16, 1.0).width;
+        x += text_width(value, size);
     }
 }
 

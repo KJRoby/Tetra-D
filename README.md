@@ -46,6 +46,8 @@ The Python bindings are built from `crates/tetrad-python` with Maturin and
 expose the `tetradynamo` module. They are the only game-state dependency of
 the Pygame frontend.
 
+Pygame also supports F5 replay saving and playback from the Replay title menu.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1

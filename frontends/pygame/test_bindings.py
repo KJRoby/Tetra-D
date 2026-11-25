@@ -46,6 +46,19 @@ def test_replay_fixture_verifies_through_python_binding():
     assert replay.verify()["phase"] == "ready"
 
 
+def test_recorded_sprint_round_trips_and_plays_through_core():
+    recorder = tetradynamo.ReplayRecorder(42, "sprint")
+    recorder.start_with_seed(42)
+    for _ in range(100):
+        recorder.step([])
+    replay = tetradynamo.Replay.from_json(recorder.replay().to_json())
+    assert replay.metadata()["mode"] == "sprint"
+    player = replay.player()
+    while player.advance() is not None:
+        pass
+    assert player.finish() == replay.verify()["final_state_hash"]
+
+
 def test_focus_loss_never_requests_resume_and_hidden_rows_are_clipped():
     assert "resume" not in focus_loss_commands()
     assert visible_piece_cells(3, 0, [(1, 0), (1, 2), (1, 22)]) == [(4, 0)]

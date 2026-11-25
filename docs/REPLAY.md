@@ -25,6 +25,10 @@ Replay browser loads compatible files through `ReplayPlayer`, verifies each
 tick during playback, and keeps viewer pause separate from recorded pause
 commands.
 
+Pygame also records and plays these same files through Python bindings to the
+core recorder and player. F5 saves completed games; the Replay menu browses
+`replays/`, and viewer pause does not advance or alter the simulation.
+
 Replay configuration includes the complete game-mode variant. Macroquad uses
 the active mode identifier (`marathon` or `sprint`) as the default saved replay
 filename prefix.

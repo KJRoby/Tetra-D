@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import sys
 import secrets
+import time
 from pathlib import Path
 from time import perf_counter
 
 import pygame
-from tetradynamo import Game, TICK_HZ
+from tetradynamo import Replay, ReplayRecorder, TICK_HZ
 
 LOGICAL_SIZE = (1280, 720)
 LOGICAL_WIDTH, LOGICAL_HEIGHT = LOGICAL_SIZE
@@ -174,7 +175,7 @@ def clear_notice_fragments(notice):
     return [(f"{prefix}{clear}  +{points}", WHITE)]
 
 
-def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed, mode):
+def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed, mode, replay=False):
     surface.fill(BLACK)
     tiny, normal, title_font = fonts
     board_x, board_y, cell = BOARD_X, BOARD_Y, CELL_SIZE
@@ -227,6 +228,8 @@ def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed, mod
         "P           PAUSE",
         "ESC         PAUSE",
     ]
+    if replay:
+        controls = ["REPLAY", "P/ESC       PAUSE", "NO LIVE INPUT"]
     text(surface, normal, "CONTROLS", (1010, 75))
     for index, control in enumerate(controls):
         text(surface, tiny, control, (1010, 112 + index * 23))
@@ -235,19 +238,22 @@ def draw_game(surface, snapshot, fonts, flash_ticks, pause_index, show_seed, mod
     phase = snapshot["phase"]
     if (countdown := countdown_label(snapshot)):
         text(surface, title_font if countdown == "GET READY" else normal, countdown, (WELL_CENTER_X, 350), WHITE, center=True)
-    if phase == "paused":
+    if phase == "paused" and not replay:
         text(surface, normal, "PAUSED", (WELL_CENTER_X, 300), WHITE, center=True)
         for index, option in enumerate(PAUSE_OPTIONS):
             color = WHITE if index == pause_index else RED
             text(surface, normal, option, (WELL_CENTER_X, 390 + index * 30), color, center=True)
-    if phase in ("gameover", "complete"):
+    if phase in ("gameover", "complete") and not replay:
         message = {"paused": "PAUSED", "gameover": "GAME OVER — R TO RESTART", "complete": f"{mode.upper()} COMPLETE — R TO RESTART"}[phase]
         text(surface, normal, message, (WELL_CENTER_X, 370), WHITE, center=True)
+        text(surface, tiny, "F5 SAVE REPLAY    ESC RETURN TO TITLE", (WELL_CENTER_X, 415), WHITE, center=True)
+    if replay:
+        text(surface, normal, "REPLAY", (1010, 300), WHITE)
 
 
-def draw_title(surface, fonts, seed_prompt, seed_text, seed_error, title_screen, title_index):
+def draw_title(surface, fonts, seed_prompt, seed_text, seed_error, title_screen, title_index, replays):
     surface.fill(BLACK)
-    _, normal, title_font = fonts
+    tiny, normal, title_font = fonts
     fragments(surface, title_font, [("TETRA|", WHITE), ("D", RED)], (640, 210), center=True)
     if title_screen in ("root", "solo"):
         options = TITLE_OPTIONS if title_screen == "root" else SOLO_OPTIONS
@@ -255,6 +261,13 @@ def draw_title(surface, fonts, seed_prompt, seed_text, seed_error, title_screen,
         for index, option in enumerate(options):
             text(surface, normal, f"> {option}" if index == title_index else option, (640, 480 + index * 40), WHITE if index == title_index else RED, center=True)
         text(surface, tiny, "UP/DOWN + ENTER/SPACE", (640, 640), RED, center=True)
+    elif title_screen == "replay":
+        text(surface, normal, "REPLAY", (640, 440), RED, center=True)
+        if not replays:
+            text(surface, normal, "NO REPLAYS FOUND", (640, 500), WHITE, center=True)
+        start = max(0, title_index - 3)
+        for row, (name, replay, detail) in enumerate(replays[start:start + 7]):
+            text(surface, tiny, f"{name}  {detail}", (300, 480 + row * 28), WHITE if start + row == title_index else RED)
     else:
         text(surface, normal, f"{title_screen.upper()} — COMING SOON", (640, 500), WHITE, center=True)
         text(surface, tiny, "ESC TO RETURN", (640, 550), RED, center=True)
@@ -272,12 +285,30 @@ def main():
     logical = pygame.Surface(LOGICAL_SIZE)
     fonts = (pygame.font.SysFont("consolas", 20, bold=True), pygame.font.SysFont("consolas", 28, bold=True), pygame.font.SysFont("consolas", 54, bold=True))
     selected_mode = "marathon"
-    game = Game(0x544554524144, selected_mode)
+    game = ReplayRecorder(0x544554524144, selected_mode)
     snapshot, pending = game.snapshot(), []
     pause_index, seed_locked, show_seed = 0, False, False
     title_screen, title_index = "root", 0
     seed_prompt, seed_text, seed_error, konami = False, "", False, []
     accumulator, previous, running, flash = 0.0, perf_counter(), True, 0
+    replays = []
+    playback = None
+    playback_paused = playback_ended = False
+    replay_pause_index = 0
+    playback_error = None
+    save_prompt, save_name, save_message = False, "", ""
+
+    def discover_replays():
+        entries = []
+        for path in sorted(Path("replays").glob("*.tdr.json")):
+            try:
+                replay = Replay.from_json(path.read_text(encoding="utf-8"))
+                meta = replay.metadata()
+                detail = f"{meta['mode'].upper()}  SCORE {meta['score']}  SEED 0x{meta['seed']:X}  {meta['ticks'] // TICK_HZ}s  {meta['phase'].upper()}"
+                entries.append((path.name, replay, detail))
+            except (ValueError, OSError, UnicodeError) as error:
+                entries.append((path.name, None, f"INVALID: {error}"))
+        return entries
 
     def apply(result):
         nonlocal snapshot, flash
@@ -286,11 +317,13 @@ def main():
             flash = 500
 
     def select_pause_option():
-        nonlocal pause_index, seed_locked, show_seed
+        nonlocal pause_index, seed_locked, show_seed, game
         if pause_index == 0:
             pending.append("resume")
         elif pause_index == 1:
-            apply(game.restart_with_seed(snapshot["seed"] if seed_locked else random_seed()))
+            seed = snapshot["seed"] if seed_locked else random_seed()
+            game = ReplayRecorder(seed, selected_mode)
+            apply(game.start_with_seed(seed))
         else:
             apply(game.return_to_title())
 
@@ -298,7 +331,50 @@ def main():
         now = perf_counter(); accumulator += min(now - previous, 0.25); previous = now
         for event in pygame.event.get():
             if event.type == pygame.QUIT: running = False
+            elif playback is not None:
+                if event.type == pygame.KEYDOWN:
+                    if playback_ended and event.key == pygame.K_ESCAPE:
+                        playback = None; title_screen, title_index = "root", 0; accumulator = 0
+                        apply(game.return_to_title())
+                    elif playback_ended and event.key == pygame.K_r:
+                        playback = playback_replay.player(); snapshot = playback.snapshot()
+                        playback_ended, playback_error, playback_paused, accumulator = False, None, False, 0
+                    elif not playback_ended and event.key in (pygame.K_p, pygame.K_ESCAPE):
+                        playback_paused = not playback_paused; replay_pause_index = 0; accumulator = 0
+                    elif playback_paused and not playback_ended and event.key in (pygame.K_UP, pygame.K_DOWN):
+                        replay_pause_index = 1 - replay_pause_index
+                    elif playback_paused and not playback_ended and event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if replay_pause_index == 0:
+                            playback_paused = False; accumulator = 0
+                        else:
+                            playback = None; playback_paused = False; title_screen, title_index = "root", 0; accumulator = 0
+                            apply(game.return_to_title())
+                elif playback_paused and not playback_ended and event.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN):
+                    option = pause_option_at(logical_mouse(event.pos, window.get_size()))
+                    if option is not None and option < 2:
+                        replay_pause_index = option
+                        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                            if option == 0:
+                                playback_paused = False; accumulator = 0
+                            else:
+                                playback = None; playback_paused = False; title_screen, title_index = "root", 0; accumulator = 0
+                                apply(game.return_to_title())
+                continue
             elif event.type == pygame.KEYDOWN:
+                if save_prompt:
+                    if event.key == pygame.K_ESCAPE: save_prompt = False
+                    elif event.key == pygame.K_BACKSPACE: save_name = save_name[:-1]
+                    elif event.key == pygame.K_RETURN:
+                        try:
+                            Path("replays").mkdir(exist_ok=True)
+                            path = Path("replays") / f"{save_name or selected_mode}-{int(time.time())}.tdr.json"
+                            path.write_text(game.replay().to_json(), encoding="utf-8")
+                            save_message = f"REPLAY SAVED: {path}"
+                        except (OSError, ValueError) as error: save_message = f"SAVE FAILED: {error}"
+                        save_prompt = False
+                    elif event.unicode and event.unicode.isascii() and (event.unicode.isalnum() or event.unicode in "_-") and len(save_name) < 48:
+                        save_name += event.unicode
+                    continue
                 if seed_prompt:
                     if event.key == pygame.K_ESCAPE:
                         seed_prompt, seed_error = False, False
@@ -324,13 +400,19 @@ def main():
                             seed_locked = not seed_locked
                             show_seed = seed_locked
                         continue
-                if event.key == pygame.K_ESCAPE or event.key == pygame.K_p:
+                if snapshot["phase"] in ("gameover", "complete") and event.key == pygame.K_F5:
+                    save_prompt, save_name, save_message = True, "", ""
+                elif snapshot["phase"] in ("gameover", "complete") and event.key == pygame.K_ESCAPE:
+                    apply(game.return_to_title()); title_screen, title_index = "root", 0
+                elif snapshot["phase"] == "title" and event.key == pygame.K_ESCAPE and title_screen != "root":
+                    title_screen, title_index = "root", 0
+                elif event.key == pygame.K_ESCAPE or event.key == pygame.K_p:
                     if snapshot["phase"] == "paused":
                         pending.append("resume")
                     elif snapshot["phase"] in ("falling", "clearing"):
                         pending.append("pause")
                 elif snapshot["phase"] == "title":
-                    options = TITLE_OPTIONS if title_screen == "root" else SOLO_OPTIONS if title_screen == "solo" else ()
+                    options = TITLE_OPTIONS if title_screen == "root" else SOLO_OPTIONS if title_screen == "solo" else replays if title_screen == "replay" else ()
                     if event.key == pygame.K_ESCAPE and title_screen != "root":
                         title_screen, title_index = "root", 0
                     elif event.key == pygame.K_UP and options:
@@ -341,11 +423,15 @@ def main():
                         if title_screen == "root":
                             selected = TITLE_OPTIONS[title_index]
                             title_screen, title_index = ("solo", 0) if selected == "SOLO" else (selected.lower(), 0)
+                            if title_screen == "replay": replays = discover_replays()
                         elif title_screen == "solo":
                             selected_mode = SOLO_OPTIONS[title_index].lower()
                             seed = snapshot["seed"] if seed_locked else random_seed()
-                            game = Game(seed, selected_mode)
+                            game = ReplayRecorder(seed, selected_mode)
                             apply(game.start_with_seed(seed))
+                        elif title_screen == "replay" and replays and replays[title_index][1]:
+                            playback_replay = replays[title_index][1]; playback = playback_replay.player()
+                            snapshot = playback.snapshot(); playback_ended = playback_paused = False; playback_error = None; pending.clear(); accumulator = 0
                 elif snapshot["phase"] == "paused":
                     if event.key == pygame.K_UP:
                         pause_index = (pause_index - 1) % len(PAUSE_OPTIONS)
@@ -353,6 +439,10 @@ def main():
                         pause_index = (pause_index + 1) % len(PAUSE_OPTIONS)
                     elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
                         select_pause_option()
+                elif snapshot["phase"] in ("gameover", "complete") and event.key == pygame.K_r:
+                    seed = snapshot["seed"] if seed_locked else random_seed()
+                    game = ReplayRecorder(seed, selected_mode)
+                    apply(game.start_with_seed(seed))
                 elif event.key in KEY_DOWN:
                     pending.append(KEY_DOWN[event.key])
             elif event.type == pygame.KEYUP and event.key in KEY_UP: pending.append(KEY_UP[event.key])
@@ -368,24 +458,59 @@ def main():
                     pause_index = option
                     select_pause_option()
             elif event.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN) and snapshot["phase"] == "title" and not seed_prompt:
-                option = title_option_at(logical_mouse(event.pos, window.get_size()), title_screen)
+                mouse = logical_mouse(event.pos, window.get_size())
+                if title_screen == "replay" and 300 <= mouse[0] <= 1100 and 480 <= mouse[1] < 676:
+                    option = max(0, title_index - 3) + int((mouse[1] - 480) // 28)
+                    if option >= len(replays): option = None
+                else:
+                    option = title_option_at(mouse, title_screen)
                 if option is not None:
                     title_index = option
                     if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         if title_screen == "root":
                             selected = TITLE_OPTIONS[title_index]
                             title_screen, title_index = ("solo", 0) if selected == "SOLO" else (selected.lower(), 0)
+                            if title_screen == "replay": replays = discover_replays()
                         elif title_screen == "solo":
                             selected_mode = SOLO_OPTIONS[title_index].lower()
                             seed = snapshot["seed"] if seed_locked else random_seed()
-                            game = Game(seed, selected_mode)
+                            game = ReplayRecorder(seed, selected_mode)
                             apply(game.start_with_seed(seed))
-        while accumulator >= 1 / TICK_HZ:
+                        elif title_screen == "replay" and replays[title_index][1]:
+                            playback_replay = replays[title_index][1]; playback = playback_replay.player()
+                            snapshot = playback.snapshot(); playback_ended = playback_paused = False; playback_error = None; pending.clear(); accumulator = 0
+        if playback is not None:
+            while not playback_paused and not playback_ended and accumulator >= 1 / TICK_HZ:
+                try:
+                    result = playback.advance()
+                    if result is None:
+                        playback.finish(); snapshot = playback.snapshot(); playback_ended = True; break
+                    snapshot = result["snapshot"]
+                    if any(item["type"] == "level_changed" for item in result["events"]): flash = 500
+                except ValueError as error:
+                    playback_error = str(error); playback_ended = True; break
+                flash = max(0, flash - 1); accumulator -= 1 / TICK_HZ
+            if playback_paused or playback_ended: accumulator = 0
+        if playback is None and snapshot["phase"] == "paused" and "resume" not in pending:
+            accumulator = 0
+        while playback is None and accumulator >= 1 / TICK_HZ:
             result = game.step(pending); pending = []; snapshot = result["snapshot"]
             if any(event["type"] == "level_changed" for event in result["events"]): flash = 500
             flash = max(0, flash - 1); accumulator -= 1 / TICK_HZ
-        if snapshot["phase"] == "title": draw_title(logical, fonts, seed_prompt, seed_text, seed_error, title_screen, title_index)
-        else: draw_game(logical, snapshot, fonts, flash, pause_index, show_seed, selected_mode)
+        if playback is None and snapshot["phase"] == "title": draw_title(logical, fonts, seed_prompt, seed_text, seed_error, title_screen, title_index, replays)
+        else:
+            draw_game(logical, snapshot, fonts, flash, pause_index, show_seed, playback_replay.metadata()["mode"] if playback else selected_mode, playback is not None)
+            if playback_paused:
+                text(logical, fonts[1], "REPLAY PAUSED", (WELL_CENTER_X, 300), WHITE, center=True)
+                for index, option in enumerate(("RESUME", "RETURN TO TITLE")):
+                    text(logical, fonts[1], option, (WELL_CENTER_X, 390 + index * 30), WHITE if index == replay_pause_index else RED, center=True)
+            if playback_ended:
+                text(logical, fonts[1], "REPLAY ERROR" if playback_error else "REPLAY ENDED", (WELL_CENTER_X, 350), WHITE, center=True)
+                text(logical, fonts[0], playback_error or "R REPLAY AGAIN   ESC RETURN TO TITLE", (WELL_CENTER_X, 390), WHITE, center=True)
+            if save_prompt:
+                text(logical, fonts[1], "SAVE REPLAY AS", (WELL_CENTER_X, 465), WHITE, center=True)
+                text(logical, fonts[1], save_name or selected_mode, (WELL_CENTER_X, 500), WHITE, center=True)
+            elif save_message: text(logical, fonts[0], save_message, (WELL_CENTER_X, 500), WHITE, center=True)
         width, height = window.get_size(); scale = min(width / LOGICAL_SIZE[0], height / LOGICAL_SIZE[1])
         scaled = pygame.transform.smoothscale(logical, (int(LOGICAL_SIZE[0] * scale), int(LOGICAL_SIZE[1] * scale)))
         window.fill(BLACK); window.blit(scaled, ((width - scaled.get_width()) // 2, (height - scaled.get_height()) // 2)); pygame.display.flip()
