@@ -12,15 +12,54 @@ use ratatui::{
     Terminal,
 };
 use std::{
-    io,
+    fs, io,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tetradynamo_core::{
-    shape_cells, Board, Command, Game, GameConfig, Phase, PieceKind, HEIGHT, HIDDEN_ROWS, WIDTH,
+    shape_cells, Board, Command, Game, GameConfig, Phase, PieceKind, Replay, ReplayPlayer,
+    ReplayRecorder, HEIGHT, HIDDEN_ROWS, WIDTH,
 };
 
 const RED: Color = Color::Rgb(255, 0, 0);
 const BLUE: Color = Color::Rgb(0, 0, 255);
+
+#[derive(Clone, Copy, PartialEq)]
+enum TitleMenu {
+    Root,
+    Solo,
+    Replay,
+    Config,
+}
+
+struct ReplayEntry {
+    name: String,
+    replay: Result<Replay, String>,
+}
+struct Playback {
+    replay: Replay,
+    player: ReplayPlayer,
+    paused: bool,
+    ended: bool,
+    error: Option<String>,
+    selection: usize,
+}
+
+fn discover_replays() -> Vec<ReplayEntry> {
+    let mut entries: Vec<_> = fs::read_dir("replays")
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tdr.json"))
+        .map(|e| ReplayEntry {
+            name: e.file_name().to_string_lossy().into_owned(),
+            replay: fs::read_to_string(e.path())
+                .map_err(|e| e.to_string())
+                .and_then(|s| Replay::from_json(&s).map_err(|e| e.to_string())),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
 
 #[derive(Default)]
 struct SeedControl {
@@ -41,12 +80,19 @@ fn main() -> io::Result<()> {
     result
 }
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    let mut game = Game::new(0x5445_5452_4144);
+    let mut game =
+        ReplayRecorder::new(0x5445_5452_4144, GameConfig::default()).expect("valid configuration");
     let mut last = Instant::now();
     let mut acc = Duration::ZERO;
     let mut pending_commands = Vec::new();
     let mut pause_index = 0_u8;
     let mut title_index = 0_u8;
+    let mut menu = TitleMenu::Root;
+    let mut replay_index = 0_usize;
+    let mut entries: Vec<ReplayEntry> = Vec::new();
+    let mut playback: Option<Playback> = None;
+    let mut save_name: Option<String> = None;
+    let mut message = String::new();
     let mut seed_control = SeedControl::default();
     let mut level_flash_ticks = 0_u32;
     loop {
@@ -54,6 +100,36 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         acc += now - last;
         last = now;
         while acc >= Duration::from_millis(1) {
+            if let Some(active) = playback.as_mut() {
+                if active.paused || active.ended {
+                    acc = Duration::ZERO;
+                    break;
+                }
+                match active.player.advance() {
+                    Ok(Some(result)) => {
+                        if result.events.iter().any(|event| {
+                            matches!(event, tetradynamo_core::GameEvent::LevelChanged { .. })
+                        }) {
+                            level_flash_ticks = 500;
+                        }
+                    }
+                    Ok(None) => {
+                        active.ended = true;
+                        active.error = active.player.finish().err().map(|e| e.to_string());
+                    }
+                    Err(error) => {
+                        active.ended = true;
+                        active.error = Some(error.to_string());
+                    }
+                }
+                level_flash_ticks = level_flash_ticks.saturating_sub(1);
+                acc -= Duration::from_millis(1);
+                continue;
+            }
+            if game.game().phase == Phase::Paused && !pending_commands.contains(&Command::Resume) {
+                acc = Duration::ZERO;
+                break;
+            }
             let batch = std::mem::take(&mut pending_commands);
             let result = game
                 .step(&batch)
@@ -70,6 +146,95 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
         }
         while event::poll(Duration::ZERO)? {
             if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Release && playback.is_some() {
+                    continue;
+                }
+                if let Some(active) = playback.as_mut() {
+                    if active.ended {
+                        match k.code {
+                            KeyCode::Esc => {
+                                playback = None;
+                                menu = TitleMenu::Root;
+                                title_index = 0;
+                                acc = Duration::ZERO;
+                            }
+                            KeyCode::Char('r') => match active.replay.player() {
+                                Ok(player) => {
+                                    active.player = player;
+                                    active.ended = false;
+                                    active.error = None;
+                                    acc = Duration::ZERO;
+                                }
+                                Err(e) => active.error = Some(e.to_string()),
+                            },
+                            _ => {}
+                        }
+                    } else if matches!(k.code, KeyCode::Esc | KeyCode::Char('p')) {
+                        active.paused = !active.paused;
+                        active.selection = 0;
+                        acc = Duration::ZERO;
+                    } else if active.paused {
+                        match k.code {
+                            KeyCode::Up | KeyCode::Down => active.selection = 1 - active.selection,
+                            KeyCode::Enter | KeyCode::Char(' ') if active.selection == 0 => {
+                                active.paused = false;
+                                acc = Duration::ZERO;
+                            }
+                            KeyCode::Enter | KeyCode::Char(' ') => {
+                                playback = None;
+                                menu = TitleMenu::Root;
+                                title_index = 0;
+                                acc = Duration::ZERO;
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                if let Some(name) = save_name.as_mut() {
+                    if k.kind == KeyEventKind::Release {
+                        continue;
+                    }
+                    match k.code {
+                        KeyCode::Esc => save_name = None,
+                        KeyCode::Backspace => {
+                            name.pop();
+                        }
+                        KeyCode::Enter => {
+                            let stem = if name.is_empty() {
+                                game.game().config().mode.id()
+                            } else {
+                                name.as_str()
+                            };
+                            let timestamp = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let path = format!("replays/{stem}-{timestamp}.tdr.json");
+                            message = match game
+                                .replay()
+                                .to_json_pretty()
+                                .map_err(|e| e.to_string())
+                                .and_then(|json| {
+                                    fs::create_dir_all("replays")
+                                        .and_then(|_| fs::write(&path, json))
+                                        .map_err(|e| e.to_string())
+                                }) {
+                                Ok(()) => format!("SAVED {path}"),
+                                Err(e) => format!("SAVE FAILED: {e}"),
+                            };
+                            save_name = None;
+                        }
+                        KeyCode::Char(c)
+                            if name.len() < 48
+                                && (c.is_ascii_alphanumeric() || c == '_' || c == '-') =>
+                        {
+                            name.push(c)
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if seed_control.prompt && k.kind != KeyEventKind::Release {
                     match k.code {
                         KeyCode::Esc => {
@@ -86,7 +251,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                                 seed_control.show = true;
                                 seed_control.prompt = false;
                                 seed_control.error = false;
-                                game = Game::with_config(seed, title_config(title_index));
+                                game = ReplayRecorder::new(seed, title_config(title_index))
+                                    .expect("valid configuration");
                                 game.start_with_seed(seed);
                             }
                             None => seed_control.error = true,
@@ -101,11 +267,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                     }
                     continue;
                 }
-                if matches!(game.phase, Phase::Title | Phase::Paused)
+                if matches!(game.game().phase, Phase::Title | Phase::Paused)
                     && k.kind != KeyEventKind::Release
                     && register_konami(&mut seed_control.code, k.code)
                 {
-                    if game.phase == Phase::Title {
+                    if game.game().phase == Phase::Title {
                         seed_control.prompt = true;
                         seed_control.value.clear();
                         seed_control.error = false;
@@ -115,8 +281,64 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                     }
                     continue;
                 }
-                if game.phase == Phase::Title && k.kind != KeyEventKind::Release {
+                if game.game().phase == Phase::Title && k.kind != KeyEventKind::Release {
+                    if menu != TitleMenu::Solo {
+                        match (menu, k.code) {
+                            (TitleMenu::Root, KeyCode::Up) => title_index = (title_index + 2) % 3,
+                            (TitleMenu::Root, KeyCode::Down) => title_index = (title_index + 1) % 3,
+                            (TitleMenu::Root, KeyCode::Enter | KeyCode::Char(' ')) => {
+                                menu = match title_index {
+                                    0 => TitleMenu::Solo,
+                                    1 => {
+                                        entries = discover_replays();
+                                        replay_index = 0;
+                                        TitleMenu::Replay
+                                    }
+                                    _ => TitleMenu::Config,
+                                };
+                                title_index = 0;
+                            }
+                            (_, KeyCode::Esc) => {
+                                menu = TitleMenu::Root;
+                                title_index = 0;
+                            }
+                            (TitleMenu::Replay, KeyCode::Up) if !entries.is_empty() => {
+                                replay_index = (replay_index + entries.len() - 1) % entries.len()
+                            }
+                            (TitleMenu::Replay, KeyCode::Down) if !entries.is_empty() => {
+                                replay_index = (replay_index + 1) % entries.len()
+                            }
+                            (TitleMenu::Replay, KeyCode::Enter | KeyCode::Char(' ')) => {
+                                if let Some(entry) = entries.get(replay_index) {
+                                    match &entry.replay {
+                                        Ok(replay) => match replay.player() {
+                                            Ok(player) => {
+                                                playback = Some(Playback {
+                                                    replay: replay.clone(),
+                                                    player,
+                                                    paused: false,
+                                                    ended: false,
+                                                    error: None,
+                                                    selection: 0,
+                                                });
+                                                acc = Duration::ZERO;
+                                                pending_commands.clear();
+                                            }
+                                            Err(e) => message = e.to_string(),
+                                        },
+                                        Err(e) => message = e.clone(),
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match k.code {
+                        KeyCode::Esc => {
+                            menu = TitleMenu::Root;
+                            title_index = 0;
+                        }
                         KeyCode::Up => title_index = (title_index + 1) % 2,
                         KeyCode::Down => title_index = (title_index + 1) % 2,
                         KeyCode::Enter | KeyCode::Char(' ') => {
@@ -125,14 +347,42 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                             } else {
                                 random_seed()
                             };
-                            game = Game::with_config(seed, title_config(title_index));
+                            game = ReplayRecorder::new(seed, title_config(title_index))
+                                .expect("valid configuration");
                             game.start_with_seed(seed);
                         }
                         _ => {}
                     }
                     continue;
                 }
-                if game.phase == Phase::Paused && k.kind != KeyEventKind::Release {
+                if matches!(game.game().phase, Phase::GameOver | Phase::Complete)
+                    && k.kind != KeyEventKind::Release
+                {
+                    match k.code {
+                        KeyCode::F(5) => {
+                            save_name = Some(String::new());
+                            message.clear();
+                        }
+                        KeyCode::Esc => {
+                            game.return_to_title();
+                            menu = TitleMenu::Root;
+                            title_index = 0;
+                        }
+                        KeyCode::Char('r') => {
+                            let seed = if seed_control.locked {
+                                game.snapshot().seed
+                            } else {
+                                random_seed()
+                            };
+                            game = ReplayRecorder::new(seed, game.game().config().clone())
+                                .expect("valid configuration");
+                            game.start_with_seed(seed);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if game.game().phase == Phase::Paused && k.kind != KeyEventKind::Release {
                     match k.code {
                         KeyCode::Up => pause_index = (pause_index + 2) % 3,
                         KeyCode::Down => pause_index = (pause_index + 1) % 3,
@@ -144,10 +394,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                                 } else {
                                     random_seed()
                                 };
-                                game.restart_with_seed(seed);
+                                game = ReplayRecorder::new(seed, game.game().config().clone())
+                                    .expect("valid configuration");
+                                game.start_with_seed(seed);
                             }
                             _ => {
                                 game.return_to_title();
+                                menu = TitleMenu::Root;
+                                title_index = 0;
                             }
                         },
                         KeyCode::Esc | KeyCode::Char('p') => pending_commands.push(Command::Resume),
@@ -156,7 +410,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                     continue;
                 }
                 if let Some(c) = command(k.code, k.kind) {
-                    let c = if c == Command::Pause && game.phase == Phase::Paused {
+                    let c = if c == Command::Pause && game.game().phase == Phase::Paused {
                         Command::Resume
                     } else {
                         c
@@ -167,7 +421,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
                         } else {
                             random_seed()
                         };
-                        game.restart_with_seed(seed);
+                        game = ReplayRecorder::new(seed, game.game().config().clone())
+                            .expect("valid configuration");
+                        game.start_with_seed(seed);
                     } else {
                         pending_commands.push(c);
                     }
@@ -184,15 +440,136 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> 
             }
         }
         terminal.draw(|f| {
+            let area = f.area();
+            if playback.is_none()
+                && game.game().phase == Phase::Title
+                && menu != TitleMenu::Solo
+                && !seed_control.prompt
+            {
+                let lines: Vec<String> = match menu {
+                    TitleMenu::Root => ["SOLO", "REPLAY", "CONFIG"]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            format!("{} {s}", if i == title_index as usize { ">" } else { " " })
+                        })
+                        .collect(),
+                    TitleMenu::Replay => {
+                        if entries.is_empty() {
+                            vec!["NO REPLAYS FOUND".into()]
+                        } else {
+                            entries
+                                .iter()
+                                .enumerate()
+                                .skip(replay_index.saturating_sub(3))
+                                .take(7)
+                                .map(|(i, e)| {
+                                    let detail = match &e.replay {
+                                        Ok(r) => format!(
+                                            "{}  0x{:X}  {}s  {}  {:?}",
+                                            r.config.mode.id(),
+                                            r.initial_seed,
+                                            r.final_state.timeline_ticks / 1000,
+                                            r.final_state.result.score,
+                                            r.final_state.result.phase
+                                        ),
+                                        Err(err) => format!("INVALID: {err}"),
+                                    };
+                                    format!(
+                                        "{} {} {detail}",
+                                        if i == replay_index { ">" } else { " " },
+                                        e.name
+                                    )
+                                })
+                                .collect()
+                        }
+                    }
+                    TitleMenu::Config => vec!["CONFIG — COMING SOON".into()],
+                    TitleMenu::Solo => unreachable!(),
+                };
+                f.render_widget(
+                    Paragraph::new(format!("TETRA|D\n\n{}\n\n{}", lines.join("\n"), message))
+                        .alignment(Alignment::Center)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(RED)),
+                        ),
+                    area,
+                );
+                return;
+            }
             draw(
-                f.area(),
                 f,
-                &game,
+                playback
+                    .as_ref()
+                    .map_or_else(|| game.game(), |active| active.player.game()),
                 level_flash_ticks,
                 pause_index,
                 &seed_control,
                 title_index,
-            )
+                playback.is_some(),
+            );
+            let overlay = if let Some(active) = playback.as_ref() {
+                if active.ended {
+                    Some(format!(
+                        "{}\n{}",
+                        if active.error.is_some() {
+                            "REPLAY ERROR"
+                        } else {
+                            "REPLAY ENDED"
+                        },
+                        active
+                            .error
+                            .as_deref()
+                            .unwrap_or("R REPLAY AGAIN  ESC TITLE")
+                    ))
+                } else if active.paused {
+                    Some(format!(
+                        "REPLAY PAUSED\n{} RESUME\n{} RETURN TO TITLE",
+                        if active.selection == 0 { ">" } else { " " },
+                        if active.selection == 1 { ">" } else { " " }
+                    ))
+                } else {
+                    Some("REPLAY".into())
+                }
+            } else if let Some(name) = &save_name {
+                Some(format!(
+                    "SAVE REPLAY AS\n{}\nENTER SAVE  ESC CANCEL",
+                    if name.is_empty() {
+                        game.game().config().mode.id()
+                    } else {
+                        name
+                    }
+                ))
+            } else if matches!(game.game().phase, Phase::GameOver | Phase::Complete) {
+                Some(format!("R RESTART  ESC TITLE\nF5 SAVE REPLAY\n{message}"))
+            } else {
+                None
+            };
+            if let Some(overlay) = overlay {
+                let rect = if playback.as_ref().is_some_and(|p| !p.paused && !p.ended) {
+                    Rect {
+                        x: area.x,
+                        y: area.y,
+                        width: 20.min(area.width),
+                        height: 1,
+                    }
+                } else {
+                    Rect {
+                        x: area.x + area.width.saturating_sub(35) / 2,
+                        y: area.y + area.height / 2,
+                        width: 35.min(area.width),
+                        height: 4.min(area.height),
+                    }
+                };
+                f.render_widget(
+                    Paragraph::new(overlay)
+                        .alignment(Alignment::Center)
+                        .style(Style::default().fg(Color::White).bg(Color::Black)),
+                    rect,
+                );
+            }
         })?;
         std::thread::sleep(Duration::from_millis(8));
     }
@@ -287,14 +664,15 @@ fn register_konami(code: &mut Vec<KeyCode>, key: KeyCode) -> bool {
 }
 
 fn draw(
-    area: Rect,
     f: &mut ratatui::Frame,
     g: &Game,
     level_flash_ticks: u32,
     pause_index: u8,
     seed_control: &SeedControl,
     title_index: u8,
+    replay: bool,
 ) {
+    let area = f.area();
     f.render_widget(
         Block::default().style(Style::default().bg(Color::Black)),
         area,
@@ -409,7 +787,7 @@ fn draw(
         width: right.width,
         height: 8,
     };
-    box_text(f,control,"CONTROLS","← → / A D  MOVE\n↑ X / Z     ROTATE\n↓ / S       SOFT DROP\nSPACE       HARD DROP\nC / H       HOLD\nP           PAUSE\nESC         QUIT".into());
+    box_text(f,control,"CONTROLS","← → / A D  MOVE\n↑ X / Z     ROTATE\n↓ / S       SOFT DROP\nSPACE       HARD DROP\nC / H       HOLD\nP / ESC     PAUSE".into());
     if let Some(notice) = g.clear_notice {
         f.render_widget(
             Paragraph::new(clear_notice_line(notice))
@@ -423,15 +801,17 @@ fn draw(
             },
         );
     }
-    if matches!(
-        g.phase,
-        Phase::Paused
-            | Phase::GameOver
-            | Phase::Complete
-            | Phase::Ready
-            | Phase::StartCountdown
-            | Phase::ResumeCountdown
-    ) {
+    if !(replay && matches!(g.phase, Phase::GameOver | Phase::Complete | Phase::Paused))
+        && matches!(
+            g.phase,
+            Phase::Paused
+                | Phase::GameOver
+                | Phase::Complete
+                | Phase::Ready
+                | Phase::StartCountdown
+                | Phase::ResumeCountdown
+        )
+    {
         let t = match g.phase {
             Phase::Paused => "PAUSED",
             Phase::GameOver => "GAME OVER — R TO RESTART",
@@ -699,7 +1079,7 @@ mod tests {
         let mut game = Game::new(7);
         game.step(&[Command::Start]).unwrap();
         terminal
-            .draw(|frame| draw(frame.area(), frame, &game, 0, 0, &SeedControl::default(), 0))
+            .draw(|frame| draw(frame, &game, 0, 0, &SeedControl::default(), 0, false))
             .unwrap();
     }
 
@@ -707,5 +1087,22 @@ mod tests {
     fn mode_time_has_hour_and_centisecond_precision() {
         assert_eq!(format_mode_time(0), "00:00:00:00");
         assert_eq!(format_mode_time(3_661_999), "01:01:01:99");
+    }
+
+    #[test]
+    fn terminal_recording_and_fixture_play_back_through_core() {
+        let mut recorder = ReplayRecorder::new(42, GameConfig::guideline_sprint()).unwrap();
+        recorder.start_with_seed(42);
+        for _ in 0..100 {
+            recorder.step(&[]).unwrap();
+        }
+        let replay = Replay::from_json(&recorder.replay().to_json_pretty().unwrap()).unwrap();
+        assert_eq!(replay.config.mode.id(), "sprint");
+        assert_eq!(
+            replay.verify().unwrap().final_state_hash,
+            replay.final_state.state_hash
+        );
+        let fixture = include_str!("../../tetradynamo-core/tests/fixtures/ready-v1.tdr.json");
+        assert!(Replay::from_json(fixture).unwrap().verify().is_ok());
     }
 }

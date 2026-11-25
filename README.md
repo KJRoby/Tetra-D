@@ -17,6 +17,9 @@ details and limitations.
 cargo run -p tetrad-term
 ```
 
+In the terminal frontend, select Replay from the title menu to browse saved
+replays; F5 saves a finished game to `replays/`.
+
 ## Native Macroquad frontend
 
 ```powershell
